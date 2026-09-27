@@ -133,6 +133,66 @@
   filter: invert(1);
 }
 
+/* Only the main app frame: overlay windows use their own documents and styles. */
+.main-window-frame {
+  background:
+    radial-gradient(ellipse at 72% 24%, rgba(137, 107, 246, 0.27), transparent 48%),
+    linear-gradient(135deg, #0b1026, #1a1f4d);
+}
+
+.light .main-window-frame {
+  background:
+    radial-gradient(ellipse at 72% 24%, rgba(166, 145, 245, 0.22), transparent 48%),
+    linear-gradient(135deg, #f6f9ff, #e6edff);
+}
+
+.main-window-sidebar {
+  color: var(--foreground);
+  background: rgba(20, 26, 60, 0.72);
+  border-right: 1px solid rgba(160, 180, 255, 0.18);
+  backdrop-filter: blur(18px);
+}
+
+.light .main-window-sidebar {
+  background: rgba(255, 255, 255, 0.72);
+  border-right-color: rgba(100, 125, 190, 0.24);
+}
+
+.sidebar-nav-link {
+  display: flex;
+  height: 42px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--foreground);
+  transition: color 150ms ease;
+}
+
+.sidebar-nav-link:hover {
+  color: #a7bdff;
+}
+
+.light .sidebar-nav-link:hover {
+  color: #3f63bb;
+}
+
+.sidebar-nav-active,
+.sidebar-nav-active:hover {
+  background: linear-gradient(110deg, #a7bdff, #a495ff);
+  color: #091738;
+  font-weight: 700;
+  box-shadow: 0 0 21px rgba(143, 134, 255, 0.35);
+}
+
+.light .sidebar-nav-active,
+.light .sidebar-nav-active:hover {
+  background: linear-gradient(110deg, #a8c6ff, #c2affb);
+  color: #193267;
+}
+
 @layer base {
   * {
     @apply border-border;

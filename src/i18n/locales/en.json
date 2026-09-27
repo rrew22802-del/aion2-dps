@@ -17,6 +17,13 @@
   "language": {
     "toggle": "Switch language"
   },
+  "nav": {
+    "home": "Home",
+    "alwaysOnTop": "Always on top",
+    "settings": "Settings",
+    "collapse": "Collapse sidebar",
+    "expand": "Expand sidebar"
+  },
   "tray": {
     "show": "Show Window",
     "quit": "Quit"
