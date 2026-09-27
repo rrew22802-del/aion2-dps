@@ -137,12 +137,15 @@ export function MainTitleBar() {
             {/* One game, so the logo is a mark rather than a picker: the old
                 hover menu listed only AION2 and could stay stuck open over
                 the sidebar. */}
-            <img
-              src="/aion2/logo.png"
-              alt="AION 2"
-              className="h-12 w-auto shrink-0 object-contain drop-shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
-              draggable={false}
-            />
+            <div className="flex shrink-0 items-center gap-2">
+              <img
+                src="/dbaion2-mark.png"
+                alt=""
+                className="h-8 w-8 shrink-0 drop-shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
+                draggable={false}
+              />
+              <span className="text-base font-semibold tracking-tight">DBAion2 DPS</span>
+            </div>
 
             <div className="flex items-center gap-1 rounded-full p-1">
               <TitleActionButton label="Back" onClick={() => window.history.back()}>
