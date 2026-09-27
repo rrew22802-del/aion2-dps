@@ -628,8 +628,9 @@ export function Aion2Settings() {
                 Detected automatically
               </h3>
               <p className="text-muted-foreground text-xs leading-5">
-                Aether finds the game&apos;s connection, your character, and the server on its
-                own, on every region. There is nothing to choose and nothing to record by hand.
+                DBAion2 DPS finds the game&apos;s connection, your character, and the server on
+                its own, on every region. There is nothing to choose and nothing to record by
+                hand.
               </p>
             </div>
             <ConnectionStatusCard />

@@ -1,5 +1,6 @@
 pub mod aion2_focus;
 pub mod aion2_overlay;
+pub mod farm_tracker;
 pub mod game_display;
 pub mod logger;
 pub mod on_top;

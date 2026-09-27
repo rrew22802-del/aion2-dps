@@ -27,7 +27,7 @@ type ExternalAction = {
 const EXTERNAL_ACTIONS: ExternalAction[] = [
   {
     label: "Github",
-    href: "https://github.com/Helveticxa/Aether-Aion2-DPS-meter-Global",
+    href: "https://github.com/rrew22802-del/aion2-dps",
     icon: FaGithub,
   },
   {
@@ -35,11 +35,11 @@ const EXTERNAL_ACTIONS: ExternalAction[] = [
     icon: HandHeart,
     content: (
       <div className="flex w-[240px] flex-col gap-1.5 p-1">
-        <div className="text-xs font-semibold">Built on NOIA2</div>
+        <div className="text-xs font-semibold">Built on Aether and NOIA2</div>
         <div className="text-muted-foreground text-xs leading-5">
-          Aether is a fork of NOIA2 by zdyoung, which contributed the capture
-          pipeline, the packet parsers, and the game-data catalogues. Licensed
-          GPL-3.0.
+          DBAion2 DPS is a rebrand of Aether, itself a fork of NOIA2 by
+          zdyoung, which contributed the capture pipeline, the packet
+          parsers, and the game-data catalogues. Licensed GPL-3.0.
         </div>
       </div>
     ),

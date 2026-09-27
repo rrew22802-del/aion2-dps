@@ -1,8 +1,18 @@
 {
   "about": {
-    "appName": "Aether",
+    "appName": "DBAion2 DPS",
     "version": "Version",
-    "description": "A real-time DPS meter for AION 2, built for the global servers. Forked from NOIA2."
+    "description": "A free, open-source real-time DPS meter for AION 2, from dbaion2.ru.",
+    "basedOn": "Based on Aether and NOIA2 (GPL-3.0).",
+    "license": "License",
+    "noWarranty": "Free software: no warranty, to the extent permitted by law.",
+    "source": "Source code",
+    "sourceDesc": "This build's own repository, including every change made to Aether.",
+    "dbaion2Group": "dbaion2.ru",
+    "database": "Item and NPC database",
+    "databaseDesc": "The site this app's data and this fork come from.",
+    "tracker": "Farm Tracker Pro",
+    "trackerDesc": "The paid farm tracker — a separate program. Opens it if installed, otherwise its download page."
   },
   "language": {
     "toggle": "Switch language"

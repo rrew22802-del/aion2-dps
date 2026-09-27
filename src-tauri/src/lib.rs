@@ -168,6 +168,7 @@ pub fn run() {
             plugins::on_top::chat::chat_status,
             plugins::game_display::get_game_display_status,
             plugins::game_display::open_graphics_settings,
+            plugins::farm_tracker::launch_farm_tracker_pro,
         ])
         .setup(|app| {
             let logger = app
@@ -179,10 +180,6 @@ pub fn run() {
             app.manage(meter);
             Ok(())
         });
-
-    // Only enable updater in release mode
-    #[cfg(not(debug_assertions))]
-    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     let app = builder
         .build(tauri::generate_context!())

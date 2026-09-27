@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { Github, RefreshCw, Trash2 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { ExternalLink, Github, RefreshCw, ScrollText, Trash2 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { toast } from "sonner";
 
 import packageJson from "../../package.json";
 
-import { UpdaterDialog } from "@/components/updater-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -41,32 +39,17 @@ const TECH_VERSIONS = [
   },
 ];
 
+const SOURCE_URL = "https://github.com/rrew22802-del/aion2-dps";
+const GPL_URL = "https://www.gnu.org/licenses/gpl-3.0.html";
+const DATABASE_URL = "https://dbaion2.ru/";
+const TRACKER_WEB_URL = "https://dbaion2.ru/tracker/";
+
 export function AboutSettings() {
   const [appVersion, setAppVersion] = useState("");
   const [clearStorageOpen, setClearStorageOpen] = useState(false);
   const [storageSummary, setStorageSummary] = useState(() => getLocalStorageSummary());
+  const [openingTracker, setOpeningTracker] = useState(false);
   const { t } = useAppTranslation();
-  // The dialog owns the updater state, driven from here by nonce. Previously
-  // this page ran its own check in a separate hook instance, found the update,
-  // and had nothing to display it with -- the button just span and went quiet.
-  const [checkNonce, setCheckNonce] = useState(0);
-  const [checking, setChecking] = useState(false);
-  const [showNoUpdate, setShowNoUpdate] = useState(false);
-
-  const handleCheckResult = useCallback(
-    (status: "available" | "up-to-date" | "error") => {
-      setChecking(false);
-      setShowNoUpdate(status === "up-to-date");
-      if (status === "error") toast.error(t("updater.checkFailed"));
-    },
-    [t]
-  );
-
-  const checkUpdate = useCallback(() => {
-    setShowNoUpdate(false);
-    setChecking(true);
-    setCheckNonce((n) => n + 1);
-  }, []);
 
   const refreshStorageSummary = useCallback(() => {
     setStorageSummary(getLocalStorageSummary());
@@ -92,7 +75,30 @@ export function AboutSettings() {
   }, [refreshStorageSummary]);
 
   const handleOpenGithub = useCallback(() => {
-    void openUrl("https://github.com/Helveticxa/Aether-Aion2-DPS-meter-Global");
+    void openUrl(SOURCE_URL);
+  }, []);
+
+  const handleOpenDatabase = useCallback(() => {
+    void openUrl(DATABASE_URL);
+  }, []);
+
+  // Farm Tracker Pro is a separate, closed-source process (the paid part of
+  // dbaion2's AION 2 tools) — this app never embeds it or shares code with it,
+  // it only offers to start it if it finds it already installed, or sends the
+  // person to the download page otherwise. Best-effort: it looks at a
+  // registry App Paths entry and a couple of common install folders, none of
+  // which have been confirmed yet against a real Farm Tracker Pro install.
+  const handleOpenTracker = useCallback(async () => {
+    setOpeningTracker(true);
+    try {
+      const launched = await invoke<boolean>("launch_farm_tracker_pro");
+      if (!launched) void openUrl(TRACKER_WEB_URL);
+    } catch (error) {
+      console.error("[about] launch_farm_tracker_pro failed:", error);
+      void openUrl(TRACKER_WEB_URL);
+    } finally {
+      setOpeningTracker(false);
+    }
   }, []);
 
   const handleClearStorage = useCallback(async () => {
@@ -110,35 +116,13 @@ export function AboutSettings() {
 
   return (
     <div className="flex flex-col gap-8">
-      <UpdaterDialog manualCheck checkNonce={checkNonce} onResult={handleCheckResult} />
-
-      <SettingsSectionHeader
-        title="About"
-        description="Application version, stack, update status, and local cache usage."
-      />
+      <SettingsSectionHeader title={t("about.appName")} description={t("about.description")} />
 
       <SettingsGroup title="Application">
-        <SettingsRow
-          label={t("about.appName")}
-          description={t("about.description")}
-          control={null}
-        />
+        <SettingsRow label={t("about.appName")} description={t("about.basedOn")} control={null} />
         <SettingsRow
           label={t("about.version")}
-          description={showNoUpdate ? t("updater.upToDate") : undefined}
-          control={
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium">{appVersion || "-"}</span>
-              <Button variant="outline" size="sm" onClick={checkUpdate} disabled={checking}>
-                <RefreshCw
-                  data-icon="inline-start"
-                  className={checking ? "animate-spin" : undefined}
-                />
-                {checking ? t("updater.checking") : t("updater.checkForUpdates")}
-              </Button>
-              {showNoUpdate ? <Badge variant="secondary">{t("updater.upToDate")}</Badge> : null}
-            </div>
-          }
+          control={<span className="text-sm font-medium">{appVersion || "-"}</span>}
         />
         {TECH_VERSIONS.map((item) => (
           <SettingsRow
@@ -148,11 +132,50 @@ export function AboutSettings() {
           />
         ))}
         <SettingsRow
-          label="GitHub"
+          label={t("about.license")}
+          description={t("about.noWarranty")}
+          control={
+            <Button variant="outline" size="sm" onClick={() => void openUrl(GPL_URL)}>
+              <ScrollText data-icon="inline-start" />
+              GPL-3.0
+            </Button>
+          }
+        />
+        <SettingsRow
+          label={t("about.source")}
+          description={t("about.sourceDesc")}
           control={
             <Button variant="outline" size="sm" onClick={handleOpenGithub}>
               <Github data-icon="inline-start" />
               GitHub
+            </Button>
+          }
+        />
+      </SettingsGroup>
+
+      <SettingsGroup title={t("about.dbaion2Group")}>
+        <SettingsRow
+          label={t("about.database")}
+          description={t("about.databaseDesc")}
+          control={
+            <Button variant="outline" size="sm" onClick={handleOpenDatabase}>
+              <ExternalLink data-icon="inline-start" />
+              dbaion2.ru
+            </Button>
+          }
+        />
+        <SettingsRow
+          label={t("about.tracker")}
+          description={t("about.trackerDesc")}
+          control={
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void handleOpenTracker()}
+              disabled={openingTracker}
+            >
+              <ExternalLink data-icon="inline-start" />
+              Farm Tracker Pro
             </Button>
           }
         />

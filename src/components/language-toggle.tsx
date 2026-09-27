@@ -12,6 +12,7 @@ import {
 const LANGUAGES = [
   { code: "en", label: "English" },
   { code: "ko", label: "한국어" },
+  { code: "ru", label: "Русский" },
 ];
 
 export function LanguageToggle() {

@@ -1,11 +1,13 @@
-# Aether — working notes
+# DBAion2 DPS — working notes
 
-A real-time DPS meter for AION 2, aimed at the global servers. Fork of
-[NOIA2](https://github.com/ZDYoung0519/NOIA2) (GPL-3.0). Rust + Tauri 2 backend,
-React 19 + TypeScript frontend.
+A real-time DPS meter for AION 2, aimed at the global servers. Rebranded from Aether — itself a
+fork of [NOIA2](https://github.com/ZDYoung0519/NOIA2) (GPL-3.0) — for dbaion2.ru; see
+[docs/DBAION2.md](./docs/DBAION2.md) for that rebrand. Rust + Tauri 2 backend, React 19 +
+TypeScript frontend.
 
-Read [FORK.md](./FORK.md) for what diverges from upstream and why. It is the
-authoritative record; this file is the short version.
+Read [FORK.md](./FORK.md) for what Aether itself diverges from NOIA2 on and why — most of the
+architecture notes below still apply verbatim, since the rebrand touched branding, theming, i18n
+and links, not the capture/parsing engine.
 
 ## Commands
 

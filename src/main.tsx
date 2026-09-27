@@ -5,14 +5,13 @@ installDevBrowserShim();
 import React, { lazy } from "react";
 import { ThemeProvider } from "./components/theme-provider";
 import ReactDOM from "react-dom/client";
-import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
+import { BrowserRouter, Navigate, Outlet, Route, Routes } from "react-router-dom";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 import { WindowFrame } from "./components/window-frame";
 import { MainTitleBar } from "./components/main-title-bar";
 import { useSettings } from "@/hooks/use-settings";
-import { UpdaterDialog } from "@/components/updater-dialog";
 
 const PreflightGatePage = lazy(() => import("./pages/preflight-gate"));
 const SettingsViewPage = lazy(() => import("./pages/settings"));
@@ -23,18 +22,6 @@ const Aion2OverlaySettingPage = lazy(() => import("./games/aion2/overlay/setting
 
 import "./index.css";
 import "./i18n";
-
-/**
- * Startup update check.
- *
- * Not mounted on the settings route: the About page runs its own manual check
- * through a second dialog, and two of them would open on top of each other.
- */
-function AutoUpdaterDialog() {
-  const { pathname } = useLocation();
-  if (pathname.startsWith("/settings-view")) return null;
-  return <UpdaterDialog />;
-}
 
 function AppWrapper() {
   useSettings(); // trigger initial sync on app start (shortcuts, config, etc.)
@@ -47,7 +34,6 @@ function AppWrapper() {
       <Route
         element={
           <WindowFrame titleBar={<MainTitleBar />} showSidebar contentClassName="overflow-auto">
-            <AutoUpdaterDialog />
             <Outlet />
           </WindowFrame>
         }
