@@ -14,6 +14,11 @@ type WindowFrameProps = {
   className?: string;
   contentClassName?: string;
   showSidebar?: boolean;
+  /** Hosted inside the farm tracker's own window (TASK-11, `--embedded`):
+   * an opaque themed background instead of the transparent-over-desktop
+   * look, and no rounded corners or drop shadow of its own -- the tracker's
+   * window frame is the only outer border now. */
+  embedded?: boolean;
 };
 
 function SidebarNavItem({
@@ -153,11 +158,14 @@ export function WindowFrame({
   className,
   contentClassName,
   showSidebar = true,
+  embedded = false,
 }: WindowFrameProps) {
   const location = useLocation();
   const gameConfig = getGameByPath(location.pathname);
   const isHomePage =
-    location.pathname === "/" || (gameConfig != null && location.pathname === gameConfig.rootPath);
+    !embedded &&
+    (location.pathname === "/" ||
+      (gameConfig != null && location.pathname === gameConfig.rootPath));
   const bgVideoRef = useRef<HTMLVideoElement>(null);
 
   // Pause the background video whenever nobody can see it. Focus covers
@@ -197,7 +205,8 @@ export function WindowFrame({
   return (
     <div
       className={cn(
-        "bg-background flex h-screen w-screen flex-col overflow-hidden rounded-2xl",
+        "bg-background flex h-screen w-screen flex-col overflow-hidden",
+        embedded ? "rounded-none" : "rounded-2xl",
         isHomePage ? "bg-transparent" : "bg-background/95",
         className
       )}
@@ -241,10 +250,12 @@ export function WindowFrame({
           <section className="relative z-10 min-h-0 min-w-0 flex-1 p-0 pt-0">
             <div
               className={cn(
-                "relative h-full min-h-0 overflow-hidden rounded-2xl",
-                isHomePage
+                "relative h-full min-h-0 overflow-hidden",
+                embedded
                   ? "bg-transparent shadow-none ring-0"
-                  : "bg-background/52 rounded-2xl shadow-[0_20px_70px_rgba(0,0,0,0.2)]",
+                  : isHomePage
+                    ? "rounded-2xl bg-transparent shadow-none ring-0"
+                    : "bg-background/52 rounded-2xl shadow-[0_20px_70px_rgba(0,0,0,0.2)]",
                 contentClassName
               )}
             >

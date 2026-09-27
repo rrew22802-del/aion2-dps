@@ -94,10 +94,16 @@ runner cannot launch an executable that demands elevation.
   They drifted apart once already and the driver went missing from every install
   while working perfectly for whoever built it. Anything a released build needs
   at runtime belongs in both.
-- **The startup gate is authoritative in Rust, not in the page.** `enter_app`
-  re-runs the checks before showing the main window, and `preflight::passed()`
-  guards `show_main_window`. Any new path that surfaces the main window has to
-  go through it, or it becomes a way around the gate.
+- **There is no startup gate any more (TASK-11).** The main window shows
+  itself immediately; `run_preflight` only feeds `PreflightBanner`, a
+  dismissible banner inside it, not a blocking screen. `enter_app` and
+  `preflight::passed()`/`mark_passed()` are gone -- don't reintroduce a
+  "passed" flag that some new path could be a way around.
+- **`--embedded` is a different launch mode, not a different build.** See
+  `src-tauri/src/embedded.rs` and `docs/DBAION2.md`: the farm tracker starts
+  this same exe with `--embedded [--theme ...] [--lang ...] [--parent-hwnd
+  <n>]`. No tray icon, sidebar or title bar of its own in that mode, and no
+  code shared with the tracker -- the command line is the entire contract.
 - **Tailwind v4 scans `.rs` files too.** A Windows path in a Rust string, like
   `"C:\...\2c40..."`, reads as a CSS hex escape and fails `vite build` with
   `Invalid code point`. Use forward slashes in paths inside Rust sources.

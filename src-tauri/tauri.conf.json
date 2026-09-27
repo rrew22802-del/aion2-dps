@@ -23,20 +23,6 @@
         "shadow": true,
         "devtools": true,
         "visible": false
-      },
-      {
-        "label": "splashscreen",
-        "title": "DBAion2 DPS",
-        "url": "/splashscreen",
-        "width": 640,
-        "height": 520,
-        "decorations": false,
-        "transparent": true,
-        "center": true,
-        "resizable": false,
-        "shadow": true,
-        "devtools": true,
-        "visible": true
       }
     ],
     "security": {

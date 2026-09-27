@@ -60,16 +60,9 @@ see `src-tauri/src/plugins/farm_tracker.rs`.
 
 ## Known gaps — please check before merging
 
-- **Icon**: the task asks for dbaion2's own site-star icon
-  (`aion2-farm-tracker/assets/app.ico` / `app-256.png`) in place of Aether's. This session's
-  own tooling refused to copy that file from the farm-tracker repository into this one
-  (a cross-repository publish guard), so `app-icon.png` and everything under `src-tauri/icons/`
-  and `public/icon.png` are still Aether's own icon. Regenerate them locally with:
-  ```
-  cp <path-to>/aion2-farm-tracker/assets/app-256.png ./app-icon.png
-  pnpm tauri icon app-icon.png
-  ```
-  then also replace `public/icon.png` (the dev favicon) with the same source, scaled down.
+- **Icon**: done — replaced locally (this sandbox's own tooling had refused the cross-repository
+  file copy; see the PR history) and the main title bar now shows `public/dbaion2-mark.png`
+  instead of the AION2 logo.
 - **Farm Tracker Pro detection is unconfirmed.** `farm_tracker.rs` checks a short list of
   plausible install paths (`%ProgramFiles%`, `%ProgramFiles(x86)%`, `%LocalAppData%`, and a
   couple of side-by-side-portable guesses) rather than a registry uninstall key, because the
@@ -79,5 +72,62 @@ see `src-tauri/src/plugins/farm_tracker.rs`.
 - **Build was verified on Linux only** (`pnpm build`, `cargo check --target
   x86_64-pc-windows-gnu`, both from `src-tauri`) — there is no Windows machine in this sandbox to
   run `pnpm tauri:dev` / `pnpm tauri:build` (packet capture, WinDivert, the NSIS installer, and
-  the elevated-terminal requirement are all Windows-only). Please do a real Windows build before
-  merging.
+  the elevated-terminal requirement are all Windows-only). `.github/workflows/build.yml` (added
+  after this doc's first version) does run a real `windows-latest` build on every pull request,
+  which is the actual verification for anything below this line too.
+
+## TASK-11 part A + A+ — one app for the user: no splash, `--embedded` mode, overlays stay Aether
+
+`docs/TASK-11-one-app.md` (in `aion2-farm-tracker`) makes the farm tracker the single program the
+user opens; this app becomes a hosted panel inside it, started as a second process the tracker
+launches and reparents into one of its own tabs (Win32 `SetParent`, no shared code — see "Why a
+rebrand, not a new repo" above, same rule). Part B (the tracker doing the hosting) is a different
+repository's own task, done separately; this section covers only part A (this repo) and part A+
+(an owner follow-up the same day).
+
+- **No more splash window.** `tauri.conf.json`'s `"splashscreen"` window, `src/pages/preflight-gate.tsx`,
+  the `enter_app` command, and `preflight::passed()`/`mark_passed()` are all gone. The main window
+  shows itself immediately (`lib.rs`'s `setup()` calls `main.show()` directly), and
+  `src/components/preflight-banner.tsx` — a small dismissible banner mounted in `main.tsx`, not a
+  blocking screen — polls the same `run_preflight` command and shows what's missing (with the same
+  "Install Npcap" / "Get the installer" fixes as before, the latter now pointing at *this* repo's
+  releases instead of Aether's). A failing required check no longer holds the app closed: the
+  meter itself already refuses to start without a working capture backend, so the gate was only
+  ever a presentation layer, and `plugins::system_tray::show_main_window` now always shows the
+  main window rather than redirecting to a splash window that no longer exists.
+- **`--embedded` launch mode** (`src-tauri/src/embedded.rs`): started with `--embedded
+  [--theme nebula|nebula-light] [--lang ru|en] [--parent-hwnd <n>]`. No tray icon (the tray plugin
+  is conditionally skipped in `lib.rs`'s `run()`), no title bar or sidebar of its own
+  (`main.tsx` passes `titleBar={null}` / `showSidebar={false}` to `WindowFrame`), and the window
+  background is the flat, opaque theme colour instead of the transparent-over-desktop look
+  (`WindowFrame`'s new `embedded` prop). `--theme`/`--lang` map onto this app's *existing*
+  dark/light and language settings rather than adding new ones: `nebula` is this app's own dark
+  palette, `nebula-light` its light one (both already dbaion2's colours since TASK-10), applied
+  through a new `forcedTheme` prop on `ThemeProvider` that never touches `localStorage` — a
+  standalone user's own theme choice must survive being overwritten by whatever `--theme` the
+  tracker happens to pass on its next embedded launch. Without `--embedded` nothing here changes
+  behaviour at all.
+- **Exit when the host goes away.** `embedded::embed_in` reparents the window (`SetParent` +
+  `WS_CHILD`, mirroring the existing pattern in `plugins/on_top/win32.rs`) and starts a background
+  thread polling `IsWindow` on the parent handle every 500 ms; the moment it stops being a window,
+  this process calls `app.exit(0)`. That is the half of "close when the host closes" this repo can
+  implement unilaterally. The task also mentions an explicit close *message* over "a named pipe or
+  localhost" as an alternative signal — that wire format has to be agreed with the farm tracker's
+  own code, a separate repository this fork must not share code with, so it is intentionally not
+  designed from this side alone; HWND-liveness polling is the complete, working mechanism for now.
+  Separately, skipping the tray plugin when embedded also fixes what would otherwise have been a
+  real bug: the app's normal "close to tray" behaviour (`RunEvent::ExitRequested` calling
+  `api.prevent_exit()`) reads an `AppLifecycleState` that only the tray plugin manages, so without
+  that guard rewritten to default to "allow exit" when the state doesn't exist, an embedded launch
+  would neither exit *nor* stop the DPS meter's capture thread on a close request.
+- **A+ — the in-game overlay windows needed no changes at all.** The owner asked that the meter
+  panel, detail/breakdown, history, PvP overlay, and toast/summary cards keep exactly upstream
+  Aether's look, reverting any Nebula recolouring. Checking `git diff` for every commit since
+  TASK-10 against `src/games/aion2/overlay/` turns up exactly three one-line changes, none of them
+  colour: two system-notification title strings ("Aether" → "DBAion2 DPS", left as-is — that's the
+  OS toast identifying which app sent it, not the overlay's own visual style) and one `ru` locale
+  registration. TASK-10's theme work only ever touched `src/index.css`'s Tailwind variables, which
+  the overlay windows never consume in the first place: each one is a standalone HTML document
+  with its own `style.css` and its own hardcoded `:root` design tokens (`--overlay-bg`, `--text`,
+  `--muted`, ...), completely separate from the main app's theme system. So "revert the
+  recolouring" had nothing left to revert — worth stating plainly here so it doesn't look skipped.
