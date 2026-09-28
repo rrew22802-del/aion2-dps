@@ -409,8 +409,11 @@ impl StreamProcessor {
                 }
                 (0x04, 0x8D) => self.parse_summon_packet_048d(payload, is_compressed_bundle),
                 (0x00, 0x8D) => {
+                    // only the "01 01" form right after the entity is about our own character (HP updates of mobs and other
+                    // players use "02 01"); counting every 00 8D kept our share under 60 % in fights, so late attach never found us
                     let actor = read_varint(payload, 2);
-                    if actor.is_valid() && actor.value > 0 {
+                    let at = 2 + actor.length as usize;
+                    if actor.is_valid() && actor.value > 0 && payload.get(at) == Some(&1) && payload.get(at + 1) == Some(&1) {
                         self.data_storage.observe_self_packet(actor.value as u32);
                     }
                     self.parse_remain_hp_packet(payload, is_compressed_bundle)
