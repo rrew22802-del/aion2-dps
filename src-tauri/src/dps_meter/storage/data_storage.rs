@@ -957,9 +957,11 @@ impl DataStorage {
     }
 }
 
+// only the own-only "01 01" form of 00 8D is counted (processor.rs), so a handful of packets with a clear leader is enough:
+// standing still it comes about once a second, and 20 samples meant ~24 s without "you" in the meter
 fn self_packet_candidate(counts: &HashMap<u32, u32>, total: u32) -> Option<u32> {
-    if total < 20 { return None; }
-    counts.iter().find(|(_, count)| u64::from(**count) * 5 >= u64::from(total) * 3)
+    if total < 5 { return None; }
+    counts.iter().find(|(_, count)| u64::from(**count) * 5 >= u64::from(total) * 4)
         .map(|(id, _)| *id)
 }
 
@@ -1103,11 +1105,11 @@ mod main_actor_tests {
     }
 
     #[test]
-    fn self_packet_needs_twenty_and_sixty_percent() {
-        let counts = HashMap::from([(1, 12), (2, 8)]);
-        assert_eq!(self_packet_candidate(&counts, 19), None);
-        assert_eq!(self_packet_candidate(&counts, 20), Some(1));
-        assert_eq!(self_packet_candidate(&HashMap::from([(1, 11), (2, 9)]), 20), None);
+    fn self_packet_needs_five_and_eighty_percent() {
+        let counts = HashMap::from([(1, 4), (2, 1)]);
+        assert_eq!(self_packet_candidate(&counts, 4), None);
+        assert_eq!(self_packet_candidate(&counts, 5), Some(1));
+        assert_eq!(self_packet_candidate(&HashMap::from([(1, 3), (2, 2)]), 5), None);
     }
 }
 
