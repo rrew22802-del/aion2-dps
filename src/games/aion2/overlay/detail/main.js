@@ -4,9 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { t, setLanguage } from "../../i18n.js";
 import skillsEn from "@/i18n/locales/aion2skills/en.json";
 import skillsKo from "@/i18n/locales/aion2skills/ko.json";
+import skillsRu from "@/i18n/locales/aion2skills/ru.json";
 import serversData from "@/games/aion2/data/servers.json";
 
-const SKILLS = { en: skillsEn, ko: skillsKo };
+const SKILLS = { en: skillsEn, ko: skillsKo, ru: skillsRu };
 let currentSkills = skillsEn;
 
 // ── Server name lookup ──

@@ -499,8 +499,16 @@ fn skill_key(id: u32) -> Option<String> {
     None
 }
 
+fn skill_names_ru() -> &'static HashMap<String, String> {
+    static NAMES: OnceLock<HashMap<String, String>> = OnceLock::new();
+    NAMES.get_or_init(|| serde_json::from_str(include_str!("../../src/i18n/locales/aion2skills/ru.json"))
+        .unwrap_or_default())
+}
+
+// ru.json has the same keys as en.json (untranslated entries keep the English name)
 fn skill_name(id: u32, lang: &str) -> Option<&'static str> {
-    if lang == "en" { skill_key(id).and_then(|key| skill_names().get(&key).map(String::as_str)) } else { None }
+    let names = match lang { "en" => skill_names(), "ru" => skill_names_ru(), _ => return None };
+    skill_key(id).and_then(|key| names.get(&key).map(String::as_str))
 }
 
 fn skill_icon(id: u32) -> String {
