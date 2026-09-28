@@ -413,8 +413,24 @@ impl StreamProcessor {
                     // players use "02 01"); counting every 00 8D kept our share under 60 % in fights, so late attach never found us
                     let actor = read_varint(payload, 2);
                     let at = 2 + actor.length as usize;
-                    if actor.is_valid() && actor.value > 0 && payload.get(at) == Some(&1) && payload.get(at + 1) == Some(&1) {
+                    let own_form = actor.is_valid() && actor.value > 0 && payload.get(at) == Some(&1) && payload.get(at + 1) == Some(&1);
+                    let before = self.data_storage.main_actor_id();
+                    if own_form {
                         self.data_storage.observe_self_packet(actor.value as u32);
+                    }
+                    // diagnostics while we still do not know our character: how many 00 8D arrive, how many in the own form
+                    if before.is_none() {
+                        use std::sync::atomic::{AtomicU32, Ordering};
+                        static SEEN: AtomicU32 = AtomicU32::new(0);
+                        static OWN: AtomicU32 = AtomicU32::new(0);
+                        let seen = SEEN.fetch_add(1, Ordering::Relaxed) + 1;
+                        let own = if own_form { OWN.fetch_add(1, Ordering::Relaxed) + 1 } else { OWN.load(Ordering::Relaxed) };
+                        if let Some(found) = self.data_storage.main_actor_id() {
+                            self.logger.info(format!("[{}] main actor inferred from 00 8D actor={found} after {seen} packets ({own} own-form)", self.port));
+                        } else if seen % 50 == 0 {
+                            self.logger.info(format!("[{}] self fallback waiting: 00 8D seen={seen} own-form={own} last actor={} bytes={:02x?}",
+                                self.port, actor.value, &payload[..payload.len().min(12)]));
+                        }
                     }
                     self.parse_remain_hp_packet(payload, is_compressed_bundle)
                 }
