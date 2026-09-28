@@ -26,7 +26,7 @@ const $playerPowerText = document.getElementById("player-power-text");
 
 document.getElementById("close-btn").addEventListener("click", async () => {
   try {
-    await getCurrentWindow().close();
+    await getCurrentWindow().hide();
   } catch (_) {
     /* ignore */
   }
@@ -72,10 +72,10 @@ function fmtPct(n) {
 }
 function fmtDuration(s) {
   if (!s || s <= 0) return "--";
-  if (s < 60) return Math.floor(s) + "s";
+  if (s < 60) return Math.floor(s) + t("dps-detail.secondsShort");
   const m = Math.floor(s / 60),
     sec = Math.floor(s % 60);
-  return m + "m " + String(sec).padStart(2, "0") + "s";
+  return m + t("dps-detail.minutesShort") + " " + String(sec).padStart(2, "0") + t("dps-detail.secondsShort");
 }
 function getClassIcon(c) {
   return c ? "/aion2/class/" + c.toLowerCase() + ".png" : "";
@@ -104,7 +104,7 @@ function resolveSkillId(id) {
 }
 function skillName(id) {
   const k = resolveSkillId(id);
-  return currentSkills[k] || "Skill #" + id;
+  return currentSkills[k] || t("dps-detail.skill") + " #" + id;
 }
 function skillIcon(id) {
   const base = resolveSkillId(id);
@@ -239,7 +239,7 @@ function setMode(m) {
 
 function render() {
   if (!selectedActorId) {
-    $playerName.textContent = "Player";
+    $playerName.textContent = t("dps-detail.player");
     $playerServer.textContent = "";
     $playerPower.style.display = "none";
     $playerIcon.style.display = "none";
@@ -512,12 +512,16 @@ function render() {
   // Init titlebar + empty text (set before render() replaces the .empty element)
   const $emptyEl = document.querySelector(".empty");
   if ($emptyEl) $emptyEl.textContent = t("dps-detail.empty");
+  document.getElementById("close-btn").title = t("dps-detail.close");
+  document.getElementById("close-btn").setAttribute("aria-label", t("dps-detail.close"));
   $modeBadge.textContent = t("dps-overlay.live");
   $modeBadge.className = "titlebar__mode is-live";
 
   listen("language-changed", (event) => {
     setLanguage(event.payload.language);
     currentSkills = SKILLS[event.payload.language] || skillsEn;
+    document.getElementById("close-btn").title = t("dps-detail.close");
+    document.getElementById("close-btn").setAttribute("aria-label", t("dps-detail.close"));
     render();
   });
 

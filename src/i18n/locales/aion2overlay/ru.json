@@ -26,6 +26,10 @@
     "deletedCount": "Удалено записей: {{count}}."
   },
   "dps-detail": {
+    "player": "Игрок",
+    "secondsShort": "с",
+    "minutesShort": "м",
+    "close": "Закрыть",
     "empty": "Нажмите на строку игрока, чтобы увидеть разбор по навыкам",
     "noData": "Нет данных по навыкам",
     "damage": "Урон",

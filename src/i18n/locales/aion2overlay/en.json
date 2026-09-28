@@ -26,6 +26,10 @@
     "deletedCount": "Deleted {{count}} record(s)."
   },
   "dps-detail": {
+    "player": "Player",
+    "secondsShort": "s",
+    "minutesShort": "m",
+    "close": "Close",
     "empty": "Click a player row to view skill details",
     "noData": "No skill data",
     "damage": "Damage",

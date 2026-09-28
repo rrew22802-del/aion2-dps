@@ -408,7 +408,13 @@ impl StreamProcessor {
                     self.parse_buff_packet(payload, is_compressed_bundle)
                 }
                 (0x04, 0x8D) => self.parse_summon_packet_048d(payload, is_compressed_bundle),
-                (0x00, 0x8D) => self.parse_remain_hp_packet(payload, is_compressed_bundle),
+                (0x00, 0x8D) => {
+                    let actor = read_varint(payload, 2);
+                    if actor.is_valid() && actor.value > 0 {
+                        self.data_storage.observe_self_packet(actor.value as u32);
+                    }
+                    self.parse_remain_hp_packet(payload, is_compressed_bundle)
+                }
                 _ => false,
             },
             ProcessorMode::NicknameOnly => match (payload[0], payload[1]) {

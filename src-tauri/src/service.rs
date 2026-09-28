@@ -1,9 +1,11 @@
 //! Local, token protected API for a host that starts the meter as a child process.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tauri::{AppHandle, Manager};
@@ -67,6 +69,26 @@ struct CaptureHealth {
     message: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DetailRequest {
+    player_id: u32,
+    fight: String,
+    x: Option<i32>,
+    y: Option<i32>,
+}
+
+fn parse_detail_request(body: &str) -> Option<(u32, String, Option<(i32, i32)>)> {
+    let request: DetailRequest = serde_json::from_str(body).ok()?;
+    if request.player_id == 0 || request.fight.is_empty() { return None; }
+    let position = match (request.x, request.y) {
+        (None, None) => None,
+        (Some(x), Some(y)) => Some((x, y)),
+        _ => return None,
+    };
+    Some((request.player_id, request.fight, position))
+}
+
 pub fn start(app: AppHandle, options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let server = Server::http(format!("127.0.0.1:{}", options.port))
         .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -122,10 +144,17 @@ fn watch_parent(app: AppHandle, parent: u32) {
 }
 
 fn serve(server: Server, app: AppHandle, options: Options, health: Arc<RwLock<CaptureHealth>>) {
-    for request in server.incoming_requests() {
+    let mut watch_names = Vec::new();
+    for mut request in server.incoming_requests() {
         let authorized = authorized(request.headers(), &options.token);
         let (status, body, quit) = if authorized {
-            route(&app, &options.lang, &health, request.method(), request.url())
+            let mut body = String::new();
+            let read = request.as_reader().take(16_385).read_to_string(&mut body);
+            if read.is_err() || body.len() > 16_384 {
+                (400, json!({"error": "invalid body"}), false)
+            } else {
+                route(&app, &options.lang, &health, request.method(), request.url(), &body, &mut watch_names)
+            }
         } else {
             (403, json!({"error": "forbidden"}), false)
         };
@@ -153,7 +182,8 @@ fn respond(request: Request, status: u16, body: Value) {
     let _ = request.respond(response);
 }
 
-fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &Method, url: &str)
+fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &Method, url: &str,
+    body: &str, watch_names: &mut Vec<String>)
     -> (u16, Value, bool)
 {
     let meter = app.state::<DpsMeter>();
@@ -186,6 +216,81 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
             (200, json!({}), false)
         }
         (Method::Post, "/v1/quit") => (200, json!({}), true),
+        (Method::Post, "/v1/ui/close") => {
+            let result = app.get_webview_window("dps-detail")
+                .map(|window| window.hide().map_err(|error| error.to_string()))
+                .unwrap_or(Ok(()));
+            match result {
+                Ok(()) => (200, json!({}), false),
+                Err(error) => (500, json!({"error": error}), false),
+            }
+        }
+        (Method::Post, "/v1/ui/player-detail") => {
+            match parse_detail_request(body) {
+                Some((player, fight, position)) => match selected_fight(&meter, &fight) {
+                    Some(selected) if player_detail(&selected, player, lang).is_some() => {
+                        let selection = match selected {
+                            SelectedFight::Current(_, target, _) => json!({"actorId": player, "targetId": target, "mode": "live"}),
+                            SelectedFight::History(record) => json!({"actorId": player, "mode": "history", "record": record}),
+                        };
+                        let result = crate::plugins::aion2_overlay::set_detail_selection(
+                            (*app).clone(), app.state(), selection)
+                            .and_then(|_| crate::plugins::aion2_overlay::show_dps_detail(app, position, true));
+                        match result {
+                            Ok(()) => (200, json!({}), false),
+                            Err(error) => (500, json!({"error": error}), false),
+                        }
+                    }
+                    Some(_) => (404, json!({"error": "player not found"}), false),
+                    None => (404, json!({"error": "fight not found"}), false),
+                },
+                None => (400, json!({"error": "playerId, fight, and paired integer x/y are required"}), false),
+            }
+        }
+        (Method::Get, "/v1/pvp") => {
+            let snapshot = meter.get_dps_snapshot(0);
+            let known_players = meter.get_pvp_watch_info(&[]).known_players;
+            let mut stats: Vec<_> = meter.get_pvp_combat_stats().into_iter().map(|row| {
+                let class = known_players.iter().find(|p| p.actor_name == row.actor_name
+                    && p.server_id.as_deref().unwrap_or("") == row.server_id.as_str());
+                let class_id = class.as_ref().and_then(|p| p.actor_class.as_deref()).and_then(|c| class_info(c, lang).0);
+                json!({"name": row.actor_name, "serverId": row.server_id, "classId": class_id,
+                    "damage": row.damage, "kills": row.kills, "assists": row.assists, "deaths": row.deaths})
+            }).collect();
+            stats.sort_by(|a, b| b["damage"].as_u64().cmp(&a["damage"].as_u64()));
+            (200, json!({"players": stats,
+                "damageDealt": snapshot.as_ref().map(|s| &s.main_actor_dealt_player_overview_stats).cloned().unwrap_or_default(),
+                "damageTaken": snapshot.as_ref().map(|s| &s.main_actor_received_player_overview_stats).cloned().unwrap_or_default()}), false)
+        }
+        (Method::Post, "/v1/pvp/clear") => {
+            meter.clear_pvp_combat_stats();
+            (200, json!({}), false)
+        }
+        (Method::Get, "/v1/pvp/watch") => {
+            let info = meter.get_pvp_watch_info(watch_names);
+            let watched: Vec<_> = info.watch_info.into_iter().map(|p| {
+                let hp_pct = match (p.current_hp, p.max_hp) {
+                    (Some(current), Some(max)) if max > 0 => Some(current as f64 * 100.0 / max as f64),
+                    _ => None,
+                };
+                json!({"name": p.query_name, "actorId": p.actor_id, "actorName": p.actor_name,
+                    "classId": p.actor_class.as_deref().and_then(|c| class_info(c, lang).0),
+                    "currentHp": p.current_hp, "maxHp": p.max_hp, "hpPct": hp_pct})
+            }).collect();
+            (200, json!({"names": watch_names, "players": watched}), false)
+        }
+        (Method::Post | Method::Delete, "/v1/pvp/watch") => {
+            let name = serde_json::from_str::<Value>(body).ok()
+                .and_then(|v| v.get("name").and_then(Value::as_str).map(str::to_string));
+            match name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty() && n.len() <= 128) {
+                Some(name) => {
+                    if method == &Method::Post && !watch_names.contains(&name) { watch_names.push(name); }
+                    else if method == &Method::Delete { watch_names.retain(|n| n != &name); }
+                    (200, json!({"names": watch_names}), false)
+                }
+                None => (400, json!({"error": "valid name required"}), false),
+            }
+        }
         (Method::Get, _) if path.starts_with("/v1/history/") => {
             let id = &path[12..];
             match meter.get_history().into_iter().find(|record| record.id == id) {
@@ -198,6 +303,29 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
             match (id.parse::<u32>(), query_value(query, "fight")) {
                 (Ok(id), Some(fight)) => match skills_for(&meter, id, fight, lang) {
                     Some(skills) => (200, json!(skills), false),
+                    None => (404, json!({"error": "fight not found"}), false),
+                },
+                _ => (400, json!({"error": "player id and fight are required"}), false),
+            }
+        }
+        (Method::Get, _) if path.starts_with("/v1/players/") && path.ends_with("/buffs") => {
+            let id = path.trim_start_matches("/v1/players/").trim_end_matches("/buffs");
+            match (id.parse::<u32>(), query_value(query, "fight")) {
+                (Ok(id), Some(fight)) => match selected_fight(&meter, fight) {
+                    Some(selected) => (200, buffs_for(&selected, id, lang), false),
+                    None => (404, json!({"error": "fight not found"}), false),
+                },
+                _ => (400, json!({"error": "player id and fight are required"}), false),
+            }
+        }
+        (Method::Get, _) if path.starts_with("/v1/players/") => {
+            let id = path.trim_start_matches("/v1/players/");
+            match (id.parse::<u32>(), query_value(query, "fight")) {
+                (Ok(id), Some(fight)) => match selected_fight(&meter, fight) {
+                    Some(selected) => match player_detail(&selected, id, lang) {
+                        Some(player) => (200, player, false),
+                        None => (404, json!({"error": "player not found"}), false),
+                    },
                     None => (404, json!({"error": "fight not found"}), false),
                 },
                 _ => (400, json!({"error": "player id and fight are required"}), false),
@@ -326,8 +454,7 @@ fn skill_names() -> &'static HashMap<String, String> {
         .unwrap_or_default())
 }
 
-fn skill_name(id: u32, lang: &str) -> Option<&'static str> {
-    if lang != "en" { return None; }
+fn skill_key(id: u32) -> Option<String> {
     let raw = id.to_string();
     let mut keys = vec![raw.clone()];
     if raw.len() > 8 {
@@ -336,42 +463,117 @@ fn skill_name(id: u32, lang: &str) -> Option<&'static str> {
     }
     if raw.len() > 6 { keys.push(format!("{}00", &raw[..6])); }
     for key in keys {
-        if let Some(name) = skill_names().get(&key) { return Some(name.as_str()); }
+        if skill_names().contains_key(&key) { return Some(key); }
     }
     None
 }
 
-fn skill_rows(skills: Option<&HashMap<u32, SkillStats>>, lang: &str) -> Vec<Value> {
+fn skill_name(id: u32, lang: &str) -> Option<&'static str> {
+    if lang == "en" { skill_key(id).and_then(|key| skill_names().get(&key).map(String::as_str)) } else { None }
+}
+
+fn skill_icon(id: u32) -> String {
+    let key = skill_key(id).unwrap_or_else(|| id.to_string().chars().take(8).collect());
+    if key.len() == 6 { key } else { key.chars().take(4).collect() }
+}
+
+fn rate(specials: &HashMap<String, u32>, hits: u32, key: &str) -> Option<f64> {
+    (hits > 0).then(|| *specials.get(key).unwrap_or(&0) as f64 / hits as f64)
+}
+
+enum SelectedFight {
+    Current(CombatSnapshot, u32, HashSet<u32>),
+    History(HistoryRecord),
+}
+
+fn selected_fight(meter: &DpsMeter, fight: &str) -> Option<SelectedFight> {
+    if let Some(snapshot) = meter.get_dps_snapshot(0) {
+        if let Some(target) = current_target(&snapshot) {
+            let started = timing(snapshot.combat_infos.target_infos.get(&target),
+                (snapshot.combat_infos.time_now * 1000.0) as u64).0;
+            if fight == "current" || fight == format!("{target}-{started}") {
+                return Some(SelectedFight::Current(snapshot, target, meter.summon_owner_ids()));
+            }
+        }
+    }
+    if fight == "current" { return None; }
+    meter.get_history().into_iter().find(|record| record.id == fight).map(SelectedFight::History)
+}
+
+fn skill_rows(skills: Option<&HashMap<u32, SkillStats>>, specs: Option<&HashMap<u32, Vec<u32>>>, lang: &str) -> Vec<Value> {
     let Some(skills) = skills else { return Vec::new(); };
     let total: u64 = skills.values().map(|s| s.total_damage).sum();
     let mut rows: Vec<_> = skills.iter().collect();
     rows.sort_by(|a, b| b.1.total_damage.cmp(&a.1.total_damage));
     rows.into_iter().map(|(id, s)| json!({"skillId": id, "name": skill_name(*id, lang),
+        "icon": skill_icon(*id), "spec": specs.and_then(|map| map.get(id)).cloned().unwrap_or_default(),
         "damage": s.total_damage, "hits": s.counts,
-        "critRate": (s.counts > 0).then(|| *s.special_counts.get("CRITICAL").unwrap_or(&0) as f64 / s.counts as f64),
+        "critRate": rate(&s.special_counts, s.counts, "CRITICAL"),
+        "perfectRate": rate(&s.special_counts, s.counts, "PERFECT"),
+        "doubleRate": rate(&s.special_counts, s.counts, "DOUBLE"),
+        "frontRate": rate(&s.special_counts, s.counts, "FRONT"),
+        "backRate": rate(&s.special_counts, s.counts, "BACK"),
+        "parryRate": rate(&s.special_counts, s.counts, "PARRY"),
+        "multiRate": rate(&s.special_counts, s.counts, "MULTIHIT"),
+        "multiDamage": s.special_counts.get("MULTIHITDMG").copied().unwrap_or(0),
+        "minHit": (s.counts > 0).then_some(s.min_damage),
+        "avgHit": (s.counts > 0).then(|| s.total_damage / s.counts as u64),
         "maxHit": s.max_damage,
         "share": if total > 0 { s.total_damage as f64 / total as f64 } else { 0.0 }})).collect()
 }
 
 fn skills_for(meter: &DpsMeter, player: u32, fight: &str, lang: &str) -> Option<Vec<Value>> {
-    if fight == "current" {
-        let snapshot = meter.get_dps_snapshot(0)?;
-        let target = current_target(&snapshot)?;
-        return Some(skill_rows(snapshot.by_target_player_skill_stats.get(&target)
-            .and_then(|players| players.get(&player)), lang));
+    let selected = selected_fight(meter, fight)?;
+    Some(match &selected {
+        SelectedFight::Current(snapshot, target, _) => skill_rows(snapshot.by_target_player_skill_stats.get(target)
+            .and_then(|players| players.get(&player)), snapshot.combat_infos.actor_infos.get(&player)
+            .map(|actor| &actor.actor_skill_spec), lang),
+        SelectedFight::History(record) => skill_rows(record.player_skill_stats.get(&player),
+            record.combat_infos.actor_infos.get(&player).map(|actor| &actor.actor_skill_spec), lang),
+    })
+}
+
+fn player_detail(fight: &SelectedFight, player: u32, lang: &str) -> Option<Value> {
+    let (stats, target, self_id, owners) = match fight {
+        SelectedFight::Current(snapshot, id, owners) => (
+            snapshot.by_target_player_stats.get(id)?.get(&player)?,
+            snapshot.combat_infos.target_infos.get(id), snapshot.combat_infos.main_actor_id, Some(owners)),
+        SelectedFight::History(record) => (
+            record.player_stats.get(&player)?, record.target_info.as_ref(),
+            record.combat_infos.main_actor_id, record.summon_owner_ids.as_ref()),
+    };
+    let mut value = player_json(stats, self_id, owners, lang);
+    let start = target.and_then(|t| t.target_start_time.get(&player)).copied();
+    let end = target.and_then(|t| t.target_last_time.get(&player)).copied();
+    let fight_sec = start.zip(end).map(|(a, b)| (b - a).max(1.0));
+    let object = value.as_object_mut()?;
+    object.insert("fightSec".into(), json!(fight_sec));
+    if let Some(seconds) = fight_sec {
+        object.insert("dps".into(), json!(stats.total_damage as f64 / seconds));
     }
-    if let Some(snapshot) = meter.get_dps_snapshot(0) {
-        if let Some(target) = current_target(&snapshot) {
-            let started = timing(snapshot.combat_infos.target_infos.get(&target),
-                (snapshot.combat_infos.time_now * 1000.0) as u64).0;
-            if fight == format!("{target}-{started}") {
-                return Some(skill_rows(snapshot.by_target_player_skill_stats.get(&target)
-                    .and_then(|players| players.get(&player)), lang));
-            }
-        }
+    for (field, key) in [("backRate", "BACK"), ("frontRate", "FRONT"),
+        ("doubleRate", "DOUBLE"), ("perfectRate", "PERFECT"),
+        ("parryRate", "PARRY"), ("multiRate", "MULTIHIT")] {
+        object.insert(field.into(), json!(rate(&stats.special_counts, stats.counts, key)));
     }
-    meter.get_history().into_iter().find(|record| record.id == fight)
-        .map(|record| skill_rows(record.player_skill_stats.get(&player), lang))
+    Some(value)
+}
+
+fn buffs_for(fight: &SelectedFight, player: u32, lang: &str) -> Value {
+    let (buffs, actors, boss) = match fight {
+        SelectedFight::Current(snapshot, target, _) => (&snapshot.use_buffs_by_target,
+            &snapshot.combat_infos.actor_infos, *target),
+        SelectedFight::History(record) => (&record.use_buffs_by_target,
+            &record.combat_infos.actor_infos, record.target_id),
+    };
+    let rows = |target| -> Vec<Value> {
+        buffs.get(&target).into_iter().flatten().map(|buff| json!({
+            "id": buff.skill_code, "name": skill_name(buff.skill_code, lang),
+            "icon": skill_icon(buff.skill_code), "uptime": buff.coverage,
+            "source": actors.get(&buff.actor_id).and_then(|actor| actor.actor_name.as_deref()),
+        })).collect()
+    };
+    json!({"player": rows(player), "boss": rows(boss)})
 }
 
 #[cfg(test)]
@@ -393,5 +595,16 @@ mod tests {
         let header = Header::from_bytes(&b"X-DBAION2-TOKEN"[..], &b"secret"[..]).unwrap();
         assert!(authorized(&[header.clone()], "secret"));
         assert!(!authorized(&[header], "wrong"));
+        let skills = HashMap::from([(11_000_000, SkillStats {
+            counts: 2, total_damage: 300, min_damage: 100, max_damage: 200,
+            special_counts: HashMap::from([("PERFECT".into(), 1), ("MULTIHITDMG".into(), 40)]),
+        })]);
+        let rows = skill_rows(Some(&skills), None, "en");
+        assert_eq!(rows[0]["perfectRate"], json!(0.5));
+        assert_eq!(rows[0]["multiDamage"], json!(40));
+        assert_eq!(rows[0]["avgHit"], json!(150));
+        assert_eq!(parse_detail_request(r#"{"playerId":7,"fight":"current","x":-50,"y":20}"#),
+            Some((7, "current".into(), Some((-50, 20)))));
+        assert!(parse_detail_request(r#"{"playerId":7,"fight":"current","x":20}"#).is_none());
     }
 }

@@ -1,4 +1,12 @@
 {
+  "embeddedMeter": {
+    "title": "Текущий бой",
+    "target": "Цель",
+    "waiting": "Ожидание данных боя",
+    "player": "Игрок",
+    "damage": "Урон",
+    "empty": "В текущем бою пока нет игроков"
+  },
   "about": {
     "appName": "DBAion2 DPS",
     "version": "Версия",

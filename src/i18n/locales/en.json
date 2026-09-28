@@ -1,4 +1,12 @@
 {
+  "embeddedMeter": {
+    "title": "Current fight",
+    "target": "Target",
+    "waiting": "Waiting for combat data",
+    "player": "Player",
+    "damage": "Damage",
+    "empty": "No players in the current fight yet"
+  },
   "about": {
     "appName": "DBAion2 DPS",
     "version": "Version",

@@ -17,6 +17,7 @@ import { useEmbeddedConfig } from "@/hooks/use-embedded-config";
 
 const SettingsViewPage = lazy(() => import("./pages/settings"));
 const Aion2HomePage = lazy(() => import("./games/aion2/pages/home"));
+const EmbeddedMeterPage = lazy(() => import("./games/aion2/pages/embedded-meter"));
 const Aion2OnTopPage = lazy(() => import("./games/aion2/pages/always-on-top"));
 
 const Aion2OverlaySettingPage = lazy(() => import("./games/aion2/overlay/setting/page"));
@@ -25,8 +26,8 @@ import "./index.css";
 import "./i18n";
 import i18n from "./i18n";
 
-function AppWrapper({ embedded }: { embedded: boolean }) {
-  useSettings(); // trigger initial sync on app start (shortcuts, config, etc.)
+function AppWrapper({ embedded, language }: { embedded: boolean; language?: string }) {
+  useSettings(embedded ? language : undefined); // trigger initial sync on app start
 
   return (
     <Routes>
@@ -49,7 +50,7 @@ function AppWrapper({ embedded }: { embedded: boolean }) {
         <Route path="/settings-view" element={<SettingsViewPage />} />
 
         {/* AION */}
-        <Route path="/aion2" element={<Aion2HomePage />} />
+        <Route path="/aion2" element={embedded ? <EmbeddedMeterPage /> : <Aion2HomePage />} />
         <Route path="/aion2/on-top" element={<Aion2OnTopPage />} />
       </Route>
 
@@ -92,7 +93,7 @@ function Root() {
     <ThemeProvider defaultTheme="dark" storageKey="tauri-ui-theme" forcedTheme={forcedTheme}>
       <BrowserRouter>
         <TooltipProvider>
-          <AppWrapper embedded={config.embedded} />
+          <AppWrapper embedded={config.embedded} language={config.lang ?? undefined} />
         </TooltipProvider>
       </BrowserRouter>
     </ThemeProvider>

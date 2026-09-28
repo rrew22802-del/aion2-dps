@@ -26,6 +26,10 @@
     "deletedCount": "{{count}}개 기록 삭제됨."
   },
   "dps-detail": {
+    "player": "플레이어",
+    "secondsShort": "초",
+    "minutesShort": "분",
+    "close": "닫기",
     "empty": "플레이어 행을 클릭하여 스킬 상세 보기",
     "noData": "스킬 데이터 없음",
     "damage": "피해량",
