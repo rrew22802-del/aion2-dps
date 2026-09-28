@@ -147,6 +147,11 @@ fn serve(server: Server, app: AppHandle, options: Options, health: Arc<RwLock<Ca
     let mut watch_names = Vec::new();
     for mut request in server.incoming_requests() {
         let authorized = authorized(request.headers(), &options.token);
+        if authorized && request.method() == &Method::Get
+            && request.url().split('?').next().unwrap_or("").starts_with("/v1/assets/") {
+            respond_asset(request, &app);
+            continue;
+        }
         let (status, body, quit) = if authorized {
             let mut body = String::new();
             let read = request.as_reader().take(16_385).read_to_string(&mut body);
@@ -180,6 +185,30 @@ fn respond(request: Request, status: u16, body: Value) {
         .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json; charset=utf-8"[..]).unwrap())
         .with_header(Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap());
     let _ = request.respond(response);
+}
+
+fn asset_path(url: &str) -> Option<&str> {
+    let path = url.split('?').next()?.strip_prefix("/v1/assets/")?;
+    let name = path.strip_prefix("aion2/class/")
+        .or_else(|| path.strip_prefix("aion2/skill/"))?
+        .strip_suffix(".png")?;
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return None;
+    }
+    Some(path)
+}
+
+fn respond_asset(request: Request, app: &AppHandle) {
+    let asset = asset_path(request.url()).and_then(|path| app.asset_resolver().get(path.into()))
+        .filter(|asset| asset.mime_type() == "image/png");
+    if let Some(asset) = asset {
+        let response = Response::from_data(asset.bytes)
+            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap())
+            .with_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=86400"[..]).unwrap());
+        let _ = request.respond(response);
+    } else {
+        respond(request, 404, json!({"error": "not found"}));
+    }
 }
 
 fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &Method, url: &str,
@@ -388,8 +417,10 @@ fn class_info(class: &str, lang: &str) -> (Option<u32>, Option<&'static str>) {
 
 fn player_json(p: &PlayerOverviewStat, self_id: Option<u32>, owners: Option<&HashSet<u32>>, lang: &str) -> Value {
     let (class_id, class_name) = class_info(&p.actor_class, lang);
+    let class_icon = class_id.map(|_| format!("aion2/class/{}.png", p.actor_class.to_ascii_lowercase()));
     json!({"id": p.actor_id, "name": if p.actor_name.is_empty() { None } else { Some(p.actor_name.as_str()) },
-        "classId": class_id, "className": class_name, "isSelf": self_id.map(|id| id == p.actor_id),
+        "classId": class_id, "className": class_name, "classIcon": class_icon,
+        "isSelf": self_id.map(|id| id == p.actor_id),
         "isSummonOwner": owners.map(|ids| ids.contains(&p.actor_id)), "damage": p.total_damage,
         "dps": p.dps, "share": p.damage_share, "hits": p.counts,
         "critRate": (p.counts > 0).then(|| *p.special_counts.get("CRITICAL").unwrap_or(&0) as f64 / p.counts as f64),
@@ -474,7 +505,8 @@ fn skill_name(id: u32, lang: &str) -> Option<&'static str> {
 
 fn skill_icon(id: u32) -> String {
     let key = skill_key(id).unwrap_or_else(|| id.to_string().chars().take(8).collect());
-    if key.len() == 6 { key } else { key.chars().take(4).collect() }
+    let name = if key.len() == 6 { key } else { key.chars().take(4).collect() };
+    format!("aion2/skill/{name}.png")
 }
 
 fn rate(specials: &HashMap<String, u32>, hits: u32, key: &str) -> Option<f64> {
@@ -591,6 +623,12 @@ mod tests {
             .map(str::to_string)).is_err());
         assert_eq!(query_value("fight=current&limit=2", "fight"), Some("current"));
         assert_eq!(class_info("GLADIATOR", "en"), (Some(2), Some("Gladiator")));
+        assert_eq!(asset_path("/v1/assets/aion2/class/gladiator.png"), Some("aion2/class/gladiator.png"));
+        assert_eq!(asset_path("/v1/assets/aion2/skill/1101.png?x=1"), Some("aion2/skill/1101.png"));
+        for path in ["aion2/class/../skill/1101.png", "aion2/skill/%2e%2e.png", "other/1101.png", "aion2/skill/no.svg"] {
+            assert_eq!(asset_path(&format!("/v1/assets/{path}")), None);
+        }
+        assert_eq!(skill_icon(11_000_000), "aion2/skill/1100.png");
         assert!(skill_name(100001, "en").is_some());
         let header = Header::from_bytes(&b"X-DBAION2-TOKEN"[..], &b"secret"[..]).unwrap();
         assert!(authorized(&[header.clone()], "secret"));

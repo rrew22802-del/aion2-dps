@@ -8,12 +8,13 @@ Start the executable as a separate process:
 
 The host can pass its PID with `--parent` or `DBAION2_PARENT_PID` (the flag wins). The service exits when that process exits, or after `POST /v1/quit`. Without a PID it runs until quit. The service opens no main or splash window and has no tray icon. Capture starts immediately. The usual in-game DPS overlay is created unless `--no-overlay` is set. An existing standalone app can run alongside the service.
 
-The server listens only on `127.0.0.1:<port>`. The token must be nonempty ASCII. Every request needs `x-dbaion2-token: <secret>`, including health and quit; otherwise it returns HTTP 403. Responses are UTF-8 JSON with `Cache-Control: no-store`. Unknown values are JSON `null`. The API is intended for polling every 250 ms.
+The server listens only on `127.0.0.1:<port>`. The token must be nonempty ASCII. Every request needs `x-dbaion2-token: <secret>`, including health, assets, and quit; otherwise it returns HTTP 403. API responses are UTF-8 JSON with `Cache-Control: no-store`; asset responses are PNG bytes with `Content-Type: image/png` and `Cache-Control: max-age=86400`. Unknown values are JSON `null`. The API is intended for polling every 250 ms.
 
 | Method | Path | Response |
 | --- | --- | --- |
 | GET | `/v1/health` | `{ "version": "2.4.0", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
 | GET | `/v1/state` | Current fight (shape below). When idle: `fightId`, `startedAt`, and `target` are `null`; `active` is `false`, numbers are zero, and `players` is empty. |
+| GET | `/v1/assets/aion2/class/{name}.png` or `/v1/assets/aion2/skill/{name}.png` | Bundled icon bytes. Only PNG files directly in those two folders are served; missing or invalid paths return 404. |
 | GET | `/v1/players/{id}/skills?fight=current` | Skills for the player on the current target. A live or archived `fightId` can replace `current`. |
 | GET | `/v1/players/{id}?fight=current` | Player detail for the current target. A live or archived `fightId` can replace `current`. |
 | GET | `/v1/players/{id}/buffs?fight=current` | Player and boss buff uptime for the current or an archived fight. |
@@ -44,22 +45,22 @@ For a tracker-hosted tab, launch the executable separately with `--embedded --pa
   "target": { "name": "…", "npcId": 2400017, "isBoss": true, "hpPct": 37.5 },
   "totalDamage": 123456,
   "players": [{
-    "id": 16450, "name": "…", "classId": 2, "className": "Gladiator",
+    "id": 16450, "name": "…", "classId": 2, "className": "Gladiator", "classIcon": "aion2/class/gladiator.png",
     "isSelf": true, "isSummonOwner": false, "damage": 34567,
     "dps": 812.3, "share": 0.28, "hits": 140, "critRate": 0.31, "maxHit": 5120
   }]
 }
 ```
 
-The current fight is the last target of the main character, or the last observed target. Its `totalDamage` and players are for that target. `startedAt` is Unix milliseconds from its first observed hit; `durationSec` ends at its last observed hit. `share` is a fraction from 0 to 1. `classId` follows the game job groups used by the parser (for example Gladiator 2); unknown classes are `null`. `isSummonOwner` refers to damage merged into a player's total from their summons. A `fightId` remains the same when the fight is archived.
+The current fight is the last target of the main character, or the last observed target. Its `totalDamage` and players are for that target. `startedAt` is Unix milliseconds from its first observed hit; `durationSec` ends at its last observed hit. `share` is a fraction from 0 to 1. `classId` follows the game job groups used by the parser (for example Gladiator 2); unknown classes have `null` for `classId`, `className`, and `classIcon`. `isSummonOwner` refers to damage merged into a player's total from their summons. A `fightId` remains the same when the fight is archived.
 
 Skills are a JSON array of `{ "skillId", "name", "damage", "hits", "critRate", "maxHit", "share" }`. Skill `share` is a fraction of that player's damage on this target. `critRate` is `null` if no hits were counted. Empty known fights return `[]`; unknown fights return 404. Invalid IDs or missing `fight` return 400.
 
-`/v1/players/{id}` includes the same `id`, `name`, `classId`, `className`, `isSelf`, `isSummonOwner`, `damage`, `dps`, `share`, `hits`, `critRate`, and `maxHit` fields as the player in `/v1/state`, plus `fightSec`, `backRate`, `frontRate`, `doubleRate`, `perfectRate`, `parryRate`, and `multiRate`. `fightSec` is that player's first-to-last hit on the target, with a 1-second minimum as in Aether's detail window (`null` if unavailable); detail `dps` uses that duration. Rates are fractions from 0 to 1 and are `null` when no hits were counted. An unknown player returns 404.
+`/v1/players/{id}` includes the same `id`, `name`, `classId`, `className`, `classIcon`, `isSelf`, `isSummonOwner`, `damage`, `dps`, `share`, `hits`, `critRate`, and `maxHit` fields as the player in `/v1/state`, plus `fightSec`, `backRate`, `frontRate`, `doubleRate`, `perfectRate`, `parryRate`, and `multiRate`. `fightSec` is that player's first-to-last hit on the target, with a 1-second minimum as in Aether's detail window (`null` if unavailable); detail `dps` uses that duration. Rates are fractions from 0 to 1 and are `null` when no hits were counted. An unknown player returns 404.
 
-Each skill also has `icon` (the UI's skill image key, used as `/aion2/skill/{icon}.png`), `spec` (active specialty slot numbers, 1–5), `perfectRate`, `doubleRate`, `frontRate`, `backRate`, `parryRate`, `multiRate`, `multiDamage`, `minHit`, and `avgHit`. Rates use the same fraction and null convention. `multiDamage` is the engine's counted multi-hit damage. `minHit` and `avgHit` are `null` with no hits.
+Each skill also has `icon` (an asset path such as `aion2/skill/1101.png`), `spec` (active specialty slot numbers, 1–5), `perfectRate`, `doubleRate`, `frontRate`, `backRate`, `parryRate`, `multiRate`, `multiDamage`, `minHit`, and `avgHit`. Rates use the same fraction and null convention. `multiDamage` is the engine's counted multi-hit damage. `minHit` and `avgHit` are `null` with no hits. Request an icon path by prefixing it with `/v1/assets/` and the service token; icons are served from the executable's bundled frontend assets, without a website request.
 
-`/v1/players/{id}/buffs` returns `{ "player": [{ "id", "name", "icon", "uptime", "source" }], "boss": [...] }`. Buff `id` is the skill code; `source` is the caster's known name or `null`. `uptime` is the engine's coverage fraction from 0 to 1. The arrays are empty when no buffs were observed. The boss array refers to the selected fight target. Buff uptime follows the engine's existing capture window.
+`/v1/players/{id}/buffs` returns `{ "player": [{ "id", "name", "icon", "uptime", "source" }], "boss": [...] }`. Buff `id` is the skill code; `icon` uses the same asset path format as skill rows; `source` is the caster's known name or `null`. `uptime` is the engine's coverage fraction from 0 to 1. The arrays are empty when no buffs were observed. The boss array refers to the selected fight target. Buff uptime follows the engine's existing capture window.
 
 `/v1/pvp` returns `{ "players": [{ "name", "serverId", "classId", "damage", "kills", "assists", "deaths" }], "damageDealt": [...], "damageTaken": [...] }`. `players` uses the engine's accumulated PvP combat stats, collected while PvP mode is enabled; its `damage` is damage to players counted in those stats. `damageDealt` and `damageTaken` are the current snapshot's existing player overview lists (camelCase engine fields such as `playerName`, `totalDamage`, and `playerClass` for dealt damage, and `actorName`, `totalDamage`, and `actorClass` for taken damage). These lists are empty without a current snapshot. Clearing PvP stats does not reset the current fight.
 
