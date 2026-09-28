@@ -1,6 +1,7 @@
 mod dps_meter;
 mod embedded;
 mod plugins;
+mod service;
 
 use tauri::{Manager, RunEvent};
 use tauri_plugin_notification::NotificationExt;
@@ -49,6 +50,14 @@ fn remove_retired_app_data(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let service = match service::Options::parse(&std::env::args().collect::<Vec<_>>()) {
+        Ok(service) => service,
+        Err(error) => {
+            eprintln!("[service] {error}");
+            return;
+        }
+    };
+    let setup_service = service.clone();
     let builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_window_state::Builder::new()
@@ -62,10 +71,6 @@ pub fn run() {
                 })
                 .build(),
         )
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // A second launch focuses whatever is already running.
-            plugins::system_tray::show_main_window(app);
-        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(plugins::logger::init())
@@ -169,7 +174,7 @@ pub fn run() {
             plugins::game_display::open_graphics_settings,
             plugins::farm_tracker::launch_farm_tracker_pro,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let logger = app
                 .state::<std::sync::Arc<plugins::logger::AppLogger>>()
                 .inner()
@@ -177,6 +182,11 @@ pub fn run() {
             remove_retired_app_data(app.handle());
             let meter = dps_meter::engine::meter::DpsMeter::new(app.handle().clone(), logger);
             app.manage(meter);
+
+            if let Some(options) = setup_service.as_ref() {
+                service::start(app.handle().clone(), options.clone())?;
+                return Ok(());
+            }
 
             // TASK-11: no splash window any more -- the main window shows
             // itself (embedded into the farm tracker's own window first, if
@@ -195,14 +205,27 @@ pub fn run() {
 
     // No tray icon of our own while hosted inside the farm tracker's window
     // -- it draws its own chrome, and a second tray icon would be confusing.
-    let builder = if embedded::is_embedded() {
+    let builder = if service.is_some() || embedded::is_embedded() {
         builder
     } else {
         builder.plugin(plugins::system_tray::init())
     };
 
+    let builder = if service.is_some() {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            plugins::system_tray::show_main_window(app);
+        }))
+    };
+
+    let mut context = tauri::generate_context!();
+    if service.is_some() {
+        context.config_mut().app.windows.clear();
+    }
+
     let app = builder
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
