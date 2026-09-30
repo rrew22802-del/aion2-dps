@@ -697,12 +697,17 @@ impl DataStorage {
     pub fn observe_self_packet(&self, actor_id: u32) {
         let inferred = {
             let mut inner = self.inner.write().unwrap();
-            if inner.main_actor_id.is_some() { return; }
+            // the own-only "01 01" form also corrects a main actor that a nickname packet set to someone else
+            // (Global 01.10: other players' fights were shown as ours); counts restart now and then to follow a relog
             inner.self_packet_total += 1;
             *inner.self_packet_counts.entry(actor_id).or_insert(0) += 1;
             let Some(inferred_id) = self_packet_candidate(&inner.self_packet_counts, inner.self_packet_total) else {
                 return;
             };
+            if inner.main_actor_id == Some(inferred_id) {
+                if inner.self_packet_total > 200 { inner.self_packet_counts.clear(); inner.self_packet_total = 0; }
+                return;
+            }
             let name = inner.actor_id_name_map.get(&inferred_id).cloned().unwrap_or_default();
             inner.main_actor_id = Some(inferred_id);
             inner.main_actor_name = Some(name.clone());

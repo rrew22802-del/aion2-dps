@@ -441,6 +441,12 @@ fn fight_state(id: String, active: bool, target: Option<&TargetInfo>,
 }
 
 fn current_target(snapshot: &CombatSnapshot) -> Option<u32> {
+    // once we know our character, only its own fights count: falling back to anyone's last target showed other
+    // players' fights as ours whenever we stood still (owner, Global 01.10)
+    if snapshot.combat_infos.main_actor_id.is_some() {
+        return snapshot.combat_infos.last_target_by_main_actor
+            .filter(|id| snapshot.by_target_player_stats.contains_key(id));
+    }
     snapshot.combat_infos.last_target_by_main_actor
         .or(snapshot.combat_infos.last_target)
         .filter(|id| snapshot.by_target_player_stats.contains_key(id))
