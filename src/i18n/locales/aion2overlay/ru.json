@@ -53,6 +53,14 @@
     "min": "Мин",
     "max": "Макс",
     "avg": "Сред",
-    "total": "Всего"
+    "total": "Всего",
+    "colCritical": "Крит",
+    "colPerfect": "Идеал",
+    "colDouble": "Двойн",
+    "colFront": "Лицо",
+    "colBack": "Спина",
+    "colParry": "Парир",
+    "colMulti": "Множ",
+    "colMultiHitDmg": "Урон множ"
   }
 }

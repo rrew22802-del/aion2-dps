@@ -385,7 +385,9 @@ function render() {
   if (skills.length > 0) {
     html += `<div class="skill-table-wrap"><div class="skill-table-scroll"><div class="skill-table">`;
     // Header
-    html += `<div class="skill-header"><span>${t("dps-detail.skill")}</span><span>${t("dps-detail.spec")}</span><span>${t("dps-detail.count")}</span><span>${t("dps-detail.critical")}%</span><span>${t("dps-detail.perfect")}%</span><span>${t("dps-detail.double")}%</span><span>${t("dps-detail.front")}%</span><span>${t("dps-detail.back")}%</span><span>${t("dps-detail.parry")}%</span><span>${t("dps-detail.multi")}%</span><span>${t("dps-detail.multiHitDmg")}</span><span>${t("dps-detail.min")}</span><span>${t("dps-detail.max")}</span><span>${t("dps-detail.avg")}</span><span>${t("dps-detail.total")}</span></div>`;
+    // short column labels where a locale has them (RU words are too long for the fixed grid)
+    const col = (short, full) => { const v = t(`dps-detail.${short}`); return v && v !== `dps-detail.${short}` ? v : t(`dps-detail.${full}`); };
+    html += `<div class="skill-header"><span>${t("dps-detail.skill")}</span><span>${t("dps-detail.spec")}</span><span>${t("dps-detail.count")}</span><span>${col("colCritical", "critical")}%</span><span>${col("colPerfect", "perfect")}%</span><span>${col("colDouble", "double")}%</span><span>${col("colFront", "front")}%</span><span>${col("colBack", "back")}%</span><span>${col("colParry", "parry")}%</span><span>${col("colMulti", "multi")}%</span><span>${col("colMultiHitDmg", "multiHitDmg")}</span><span>${t("dps-detail.min")}</span><span>${t("dps-detail.max")}</span><span>${t("dps-detail.avg")}</span><span>${t("dps-detail.total")}</span></div>`;
     for (const s of skills) {
       const sc = getSpecial(s, "CRITICAL");
       const bk = getSpecial(s, "BACK");
