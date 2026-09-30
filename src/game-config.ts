@@ -21,12 +21,13 @@ export const AION2_GAME: GameConfig = {
   name: "AION2",
   rootPath: "/aion2",
   navItems: [
-    { label: "Home", path: "/aion2", icon: Home },
-    { label: "Always on top", path: "/aion2/on-top", icon: Pin },
+    { label: "nav.home", path: "/aion2", icon: Home },
+    { label: "nav.alwaysOnTop", path: "/aion2/on-top", icon: Pin },
   ],
 
-  bgVideo: "/aion2/bg-dune.mp4",
-  bgImage: "/aion2/background-dune.webp",
+  // No background video/image: the upstream "Dune" clip is not GPL-licensed
+  // and was dropped for this fork (see docs/DBAION2.md). CSS supplies the
+  // main window's Nebula background.
 };
 
 export const ALL_GAMES: GameConfig[] = [AION2_GAME];

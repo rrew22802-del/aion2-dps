@@ -457,7 +457,7 @@ document.getElementById("copy-report-btn").addEventListener("click", () => {
   void runAction("Copy report", async () => {
     await copyText(report);
     invoke("show_system_notification", {
-      title: "Aether",
+      title: "DBAion2 DPS",
       body: "Battle report copied to clipboard",
     }).catch(() => {});
   });

@@ -1,0 +1,3 @@
+The main window now has opaque Nebula gradients for dark and light themes. Its sidebar has the requested glass styling, gradient active pill, and Russian labels. Existing routes remain available, `--embedded` still hides the sidebar and title bar, and overlay routes were untouched.
+
+The change is recorded in [DBAION2-TASK13.md](G:/dbaion2/aion2-dps/docs/DBAION2-TASK13.md). Locale and static checks passed; a frontend build was unavailable because pnpm and installed dependencies are absent.

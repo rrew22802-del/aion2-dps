@@ -1,5 +1,7 @@
 mod dps_meter;
+mod embedded;
 mod plugins;
+mod service;
 
 use tauri::{Manager, RunEvent};
 use tauri_plugin_notification::NotificationExt;
@@ -48,12 +50,20 @@ fn remove_retired_app_data(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let service = match service::Options::parse(&std::env::args().collect::<Vec<_>>()) {
+        Ok(service) => service,
+        Err(error) => {
+            eprintln!("[service] {error}");
+            return;
+        }
+    };
+    let setup_service = service.clone();
     let builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
                 .with_filter(|label| {
-                    !(matches!(label, "splashscreen" | "dps-overlay-pvp")
+                    !(label == "dps-overlay-pvp"
                     // Chat pop-ups are placed from the Always on top page,
                     // which remembers where; restoring a title bar left on
                     // mid-move would be wrong.
@@ -61,17 +71,11 @@ pub fn run() {
                 })
                 .build(),
         )
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // A second launch focuses what is already running -- which, while
-            // the startup gate is still holding, is the gate and not the app.
-            plugins::system_tray::show_main_window(app);
-        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(plugins::logger::init())
         .plugin(plugins::shortcut::global_shortcut_plugin())
         .plugin(plugins::shortcut::init())
-        .plugin(plugins::system_tray::init())
         .plugin(plugins::aion2_overlay::init())
         .plugin(plugins::aion2_focus::init())
         .plugin(plugins::window_tracking::init())
@@ -121,8 +125,8 @@ pub fn run() {
             dps_meter::api::commands::delete_history_records,
             dps_meter::api::commands::check_npcap_available,
             dps_meter::api::commands::run_preflight,
-            dps_meter::api::commands::enter_app,
             dps_meter::api::commands::install_npcap,
+            embedded::get_embedded_config,
             plugins::aion2_overlay::create_dps_overlay,
             plugins::aion2_overlay::destroy_dps_overlay,
             plugins::aion2_overlay::create_pvp_overlay,
@@ -168,8 +172,9 @@ pub fn run() {
             plugins::on_top::chat::chat_status,
             plugins::game_display::get_game_display_status,
             plugins::game_display::open_graphics_settings,
+            plugins::farm_tracker::launch_farm_tracker_pro,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let logger = app
                 .state::<std::sync::Arc<plugins::logger::AppLogger>>()
                 .inner()
@@ -177,15 +182,50 @@ pub fn run() {
             remove_retired_app_data(app.handle());
             let meter = dps_meter::engine::meter::DpsMeter::new(app.handle().clone(), logger);
             app.manage(meter);
+
+            if let Some(options) = setup_service.as_ref() {
+                service::start(app.handle().clone(), options.clone())?;
+                return Ok(());
+            }
+
+            // TASK-11: no splash window any more -- the main window shows
+            // itself (embedded into the farm tracker's own window first, if
+            // one was given), and the startup checks live in its own banner.
+            if let Some(main) = app.get_webview_window("main") {
+                #[cfg(windows)]
+                if embedded::is_embedded() {
+                    if let Some(hwnd) = embedded::parent_hwnd() {
+                        embedded::embed_in(app.handle(), &main, hwnd);
+                    }
+                }
+                let _ = main.show();
+            }
             Ok(())
         });
 
-    // Only enable updater in release mode
-    #[cfg(not(debug_assertions))]
-    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    // No tray icon of our own while hosted inside the farm tracker's window
+    // -- it draws its own chrome, and a second tray icon would be confusing.
+    let builder = if service.is_some() || embedded::is_embedded() {
+        builder
+    } else {
+        builder.plugin(plugins::system_tray::init())
+    };
+
+    let builder = if service.is_some() {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            plugins::system_tray::show_main_window(app);
+        }))
+    };
+
+    let mut context = tauri::generate_context!();
+    if service.is_some() {
+        context.config_mut().app.windows.clear();
+    }
 
     let app = builder
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
@@ -199,14 +239,19 @@ pub fn run() {
             return;
         }
         if let RunEvent::ExitRequested { api, .. } = event {
-            if let Some(state) = app_handle.try_state::<plugins::system_tray::AppLifecycleState>() {
-                if !plugins::system_tray::should_allow_exit(state) {
-                    api.prevent_exit();
-                } else if let Some(meter) =
-                    app_handle.try_state::<dps_meter::engine::meter::DpsMeter>()
-                {
-                    meter.stop_dps_meter();
-                }
+            // Closing to the tray only makes sense when there is a tray to
+            // bring it back from; embedded mode has none, so there is no
+            // AppLifecycleState and a close request always means exit.
+            let should_exit = app_handle
+                .try_state::<plugins::system_tray::AppLifecycleState>()
+                .map(plugins::system_tray::should_allow_exit)
+                .unwrap_or(true);
+
+            if !should_exit {
+                api.prevent_exit();
+            } else if let Some(meter) = app_handle.try_state::<dps_meter::engine::meter::DpsMeter>()
+            {
+                meter.stop_dps_meter();
             }
         }
     });

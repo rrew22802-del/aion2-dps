@@ -386,38 +386,11 @@ pub fn check_npcap_available() -> Result<WinDivertStatus, String> {
     Ok(status)
 }
 
-/// Everything the startup gate needs, in one call.
+/// Everything the startup banner needs, in one call (TASK-11: shown inside
+/// the main window rather than gating a separate splash window).
 #[tauri::command]
 pub fn run_preflight() -> Result<preflight::Report, String> {
     Ok(preflight::run())
-}
-
-/// Open the main window, but only if the checks still pass.
-///
-/// The decision lives here rather than in the gate's JavaScript so that it
-/// cannot drift: the checks are re-run at the moment of entry, which costs
-/// milliseconds and means a driver that died between the last check and the
-/// click cannot let anyone through.
-#[tauri::command]
-pub fn enter_app(app: AppHandle) -> Result<(), String> {
-    use tauri::Manager;
-
-    let report = preflight::run();
-    if !report.ready {
-        return Err(report.summary);
-    }
-    preflight::mark_passed();
-
-    if let Some(main) = app.get_webview_window("main") {
-        main.show().map_err(|error| error.to_string())?;
-        let _ = main.unminimize();
-        let _ = main.set_focus();
-    }
-    if let Some(gate) = app.get_webview_window("splashscreen") {
-        let _ = gate.close();
-    }
-
-    Ok(())
 }
 
 /// Pinned to an exact build. The URL and the digest move together, in one

@@ -153,6 +153,8 @@ struct DataStorageInner {
     dot_skill_list: Vec<u32>,
     main_actor_id: Option<u32>,
     main_actor_name: Option<String>,
+    self_packet_counts: HashMap<u32, u32>,
+    self_packet_total: u32,
     main_actor_combat_power: Option<u64>,
     last_target: Option<u32>,
     last_target_by_main_actor: Option<u32>,
@@ -191,6 +193,8 @@ impl Default for DataStorageInner {
             dot_skill_list: Vec::new(),
             main_actor_id: None,
             main_actor_name: None,
+            self_packet_counts: HashMap::new(),
+            self_packet_total: 0,
             main_actor_combat_power: None,
             last_target: None,
             last_target_by_main_actor: None,
@@ -244,6 +248,8 @@ impl DataStorage {
         let mut inner = self.inner.write().unwrap();
         let main_actor_id = inner.main_actor_id;
         let main_actor_name = inner.main_actor_name.clone();
+        let self_packet_counts = inner.self_packet_counts.clone();
+        let self_packet_total = inner.self_packet_total;
         let main_actor_combat_power = inner.main_actor_combat_power;
         let actor_id_name_map = inner.actor_id_name_map.clone();
         let actor_id_server_map = inner.actor_id_server_map.clone();
@@ -264,6 +270,8 @@ impl DataStorage {
         *inner = DataStorageInner::default();
         inner.main_actor_id = main_actor_id;
         inner.main_actor_name = main_actor_name;
+        inner.self_packet_counts = self_packet_counts;
+        inner.self_packet_total = self_packet_total;
         inner.main_actor_combat_power = main_actor_combat_power;
         inner.actor_id_name_map = actor_id_name_map;
         inner.actor_id_server_map = actor_id_server_map;
@@ -650,12 +658,15 @@ impl DataStorage {
     pub fn set_main_actor(&self, actor_id: u32, actor_name: &str) {
         let (sid, is_new_player) = {
             let mut inner = self.inner.write().unwrap();
-            let is_new_player = main_actor_changed(inner.main_actor_name.as_deref(), actor_name);
+            let is_new_player = main_actor_changed(inner.main_actor_name.as_deref(), actor_name)
+                && !(inner.main_actor_id == Some(actor_id) && inner.main_actor_name.as_deref() == Some(""));
             if is_new_player {
                 inner.main_actor_combat_power = None;
             }
             inner.main_actor_id = Some(actor_id);
             inner.main_actor_name = Some(actor_name.to_string());
+            inner.self_packet_counts.clear();
+            inner.self_packet_total = 0;
             (
                 inner.actor_id_server_map.get(&actor_id).cloned(),
                 is_new_player,
@@ -680,6 +691,35 @@ impl DataStorage {
                 sid,
             },
         );
+    }
+
+    /// 00 8D usually refers to our own entity, including after a late attach.
+    pub fn observe_self_packet(&self, actor_id: u32) {
+        let inferred = {
+            let mut inner = self.inner.write().unwrap();
+            // the own-only "01 01" form also corrects a main actor that a nickname packet set to someone else
+            // (Global 01.10: other players' fights were shown as ours); counts restart now and then to follow a relog
+            inner.self_packet_total += 1;
+            *inner.self_packet_counts.entry(actor_id).or_insert(0) += 1;
+            let Some(inferred_id) = self_packet_candidate(&inner.self_packet_counts, inner.self_packet_total) else {
+                return;
+            };
+            if inner.main_actor_id == Some(inferred_id) {
+                if inner.self_packet_total > 200 { inner.self_packet_counts.clear(); inner.self_packet_total = 0; }
+                return;
+            }
+            let name = inner.actor_id_name_map.get(&inferred_id).cloned().unwrap_or_default();
+            inner.main_actor_id = Some(inferred_id);
+            inner.main_actor_name = Some(name.clone());
+            inner.self_packet_counts.clear();
+            inner.self_packet_total = 0;
+            Some((inferred_id, name))
+        };
+        if let Some((actor_id, name)) = inferred {
+            let _ = self.app.emit("dps-main-actor-detected", MainActorDetectedPayload {
+                actor_id, actor_name: name, sid: self.actor_id_server_snapshot().get(&actor_id).cloned(),
+            });
+        }
     }
 
     pub fn get_dps_stats_snapshot(&self) -> HashMap<u32, HashMap<u32, HashMap<u32, SkillStats>>> {
@@ -922,6 +962,14 @@ impl DataStorage {
     }
 }
 
+// only the own-only "01 01" form of 00 8D is counted (processor.rs), so a handful of packets with a clear leader is enough:
+// standing still it comes about once a second, and 20 samples meant ~24 s without "you" in the meter
+fn self_packet_candidate(counts: &HashMap<u32, u32>, total: u32) -> Option<u32> {
+    if total < 5 { return None; }
+    counts.iter().find(|(_, count)| u64::from(**count) * 5 >= u64::from(total) * 4)
+        .map(|(id, _)| *id)
+}
+
 fn infer_specialty_slots(skill_id: u32) -> Vec<u32> {
     let last_4_digits = skill_id % 10000;
     let slot_1 = (last_4_digits / 1000) % 10;
@@ -1041,7 +1089,8 @@ fn main_actor_changed(current: Option<&str>, next: &str) -> bool {
 
 #[cfg(test)]
 mod main_actor_tests {
-    use super::main_actor_changed;
+    use super::{main_actor_changed, self_packet_candidate};
+    use std::collections::HashMap;
 
     #[test]
     fn first_identification_counts_as_a_change() {
@@ -1058,6 +1107,14 @@ mod main_actor_tests {
     #[test]
     fn switching_character_counts_as_a_change() {
         assert!(main_actor_changed(Some("Helveticaa"), "HiorV11"));
+    }
+
+    #[test]
+    fn self_packet_needs_five_and_eighty_percent() {
+        let counts = HashMap::from([(1, 4), (2, 1)]);
+        assert_eq!(self_packet_candidate(&counts, 4), None);
+        assert_eq!(self_packet_candidate(&counts, 5), Some(1));
+        assert_eq!(self_packet_candidate(&HashMap::from([(1, 3), (2, 2)]), 5), None);
     }
 }
 

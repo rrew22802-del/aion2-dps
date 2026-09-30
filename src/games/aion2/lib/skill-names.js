@@ -7,12 +7,14 @@
 const tables = new Map();
 
 export async function loadSkillNames(language) {
-  const lang = language === "ko" ? "ko" : "en";
+  const lang = language === "ko" || language === "ru" ? language : "en";
   if (!tables.has(lang)) {
     const module =
       lang === "ko"
         ? await import("@/i18n/locales/aion2skills/ko.json")
-        : await import("@/i18n/locales/aion2skills/en.json");
+        : lang === "ru"
+          ? await import("@/i18n/locales/aion2skills/ru.json")
+          : await import("@/i18n/locales/aion2skills/en.json");
     tables.set(lang, module.default);
   }
   return tables.get(lang);

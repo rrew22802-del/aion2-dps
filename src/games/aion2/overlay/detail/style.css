@@ -525,7 +525,8 @@ body::before {
 .skill-header,
 .skill-row {
   display: grid;
-  grid-template-columns: 160px 0.3fr 0.35fr 0.48fr 0.48fr 0.48fr 0.48fr 0.48fr 0.48fr 0.48fr 0.5fr 0.45fr 0.5fr 0.5fr 1fr;
+  /* minmax(0, …): a long header (RU «ПАРИРОВАНИЕ%») must not widen its column only in the header row */
+  grid-template-columns: 160px repeat(2, minmax(0, 0.33fr)) repeat(7, minmax(0, 0.48fr)) minmax(0, 0.5fr) minmax(0, 0.45fr) repeat(2, minmax(0, 0.5fr)) minmax(0, 1fr);
   gap: 6px;
   align-items: center;
 }
@@ -543,6 +544,9 @@ body::before {
   color: rgba(255, 255, 255, 0.4);
 }
 .skill-header > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   text-align: right;
 }
 .skill-header > span:first-child {

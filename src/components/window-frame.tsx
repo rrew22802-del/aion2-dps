@@ -1,12 +1,10 @@
 import { cn } from "@/lib/utils";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import { LayoutGroup, motion } from "framer-motion";
 import { ALL_GAMES, getGameByPath, type NavItem } from "@/game-config";
 import { PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-
-import { Button } from "@/components/ui/button";
+import { useTranslation } from "react-i18next";
 
 type WindowFrameProps = {
   titleBar: ReactNode;
@@ -14,6 +12,11 @@ type WindowFrameProps = {
   className?: string;
   contentClassName?: string;
   showSidebar?: boolean;
+  /** Hosted inside the farm tracker's own window (TASK-11, `--embedded`):
+   * an opaque themed background instead of the transparent-over-desktop
+   * look, and no rounded corners or drop shadow of its own -- the tracker's
+   * window frame is the only outer border now. */
+  embedded?: boolean;
 };
 
 function SidebarNavItem({
@@ -23,68 +26,36 @@ function SidebarNavItem({
   expanded,
   activePaths,
 }: NavItem & { expanded: boolean }) {
+  const { t } = useTranslation();
   const location = useLocation();
   const paths = activePaths ?? [path];
   const isActive = paths.includes(location.pathname);
+  const translatedLabel = t(label);
 
   return (
-    <NavLink to={path} className="block" title={expanded ? undefined : label}>
-      {() => (
-        <Button
-          variant="ghost"
-          className={cn(
-            "group relative h-10 w-full justify-start overflow-visible rounded-xl px-0 text-sm font-medium transition-[color,gap,padding] duration-200",
-            expanded ? "gap-2.5 px-2" : "justify-center gap-0"
-          )}
-          aria-label={label}
-        >
-          {isActive && (
-            <motion.span
-              layoutId="sidebar-active-pill"
-              className="bg-accent absolute inset-0 z-0 rounded-xl"
-              transition={{ type: "spring", stiffness: 460, damping: 38, mass: 0.7 }}
-            />
-          )}
-          <span
-            className={cn(
-              "relative z-10 flex size-9 shrink-0 items-center justify-center rounded-xl transition-colors"
-            )}
-          >
-            {isActive && (
-              <motion.span
-                layoutId="sidebar-active-line"
-                className="bg-primary absolute top-1/2 -left-1.5 h-5 w-0.5 -translate-y-1/2 rounded-full"
-                transition={{ type: "spring", stiffness: 520, damping: 42, mass: 0.55 }}
-              />
-            )}
-            <Icon />
-          </span>
-          <span
-            className={cn(
-              "relative z-10 min-w-0 truncate text-left transition-[opacity,transform,width] duration-200",
-              expanded ? "w-auto opacity-100" : "w-0 translate-x-1 opacity-0"
-            )}
-          >
-            {label}
-          </span>
-        </Button>
-      )}
+    <NavLink
+      to={path}
+      className={cn("sidebar-nav-link", isActive && "sidebar-nav-active", !expanded && "justify-center")}
+      title={expanded ? undefined : translatedLabel}
+      aria-label={translatedLabel}
+    >
+      <Icon className="size-4 shrink-0" />
+      {expanded && <span className="truncate">{translatedLabel}</span>}
     </NavLink>
   );
 }
 
-function WindowSidebar({ isHomePage }: { isHomePage: boolean }) {
+function WindowSidebar() {
+  const { t } = useTranslation();
   const location = useLocation();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const gameConfig = getGameByPath(location.pathname) ?? ALL_GAMES[0];
   const navItems = gameConfig?.navItems ?? [];
   const SIDEBAR_STORAGE_KEY = "noia-main-sidebar-expanded";
 
   useEffect(() => {
     const stored = window.localStorage.getItem(SIDEBAR_STORAGE_KEY);
-    if (stored === "true") {
-      setExpanded(true);
-    }
+    if (stored !== null) setExpanded(stored === "true");
   }, []);
 
   const toggleExpanded = () => {
@@ -98,50 +69,42 @@ function WindowSidebar({ isHomePage }: { isHomePage: boolean }) {
   return (
     <aside
       className={cn(
-        "text-card-foreground relative z-10 shrink-0 overflow-hidden transition-[width] duration-200 ease-out",
-        isHomePage ? "bg-transparent" : "bg-background/52",
-        expanded ? "w-[212px]" : "w-16"
+        "main-window-sidebar relative z-10 shrink-0 overflow-hidden transition-[width] duration-200 ease-out",
+        expanded ? "w-[220px]" : "w-16"
       )}
     >
       <div className="flex h-full flex-col px-3 pt-3 pb-3">
-        <LayoutGroup id="main-sidebar-nav">
-          <nav className="flex flex-col gap-1.5">
-            {navItems.map((item) => (
-              <SidebarNavItem key={item.path} {...item} expanded={expanded} />
-            ))}
-          </nav>
+        <nav className="flex flex-col gap-1.5">
+          {navItems.map((item) => (
+            <SidebarNavItem key={item.path} {...item} expanded={expanded} />
+          ))}
+        </nav>
 
-          <div className="mt-auto flex flex-col gap-1.5">
-            <SidebarNavItem
-              path="/settings-view"
-              label="Settings"
-              icon={Settings}
-              expanded={expanded}
-            />
-            <button
-              type="button"
-              className={cn(
-                "group text-muted-foreground hover:text-foreground flex h-10 w-full items-center rounded-xl text-sm transition-colors",
-                expanded ? "justify-start gap-2.5 px-2" : "justify-center gap-0"
-              )}
-              onClick={toggleExpanded}
-              aria-label={expanded ? "Collapse sidebar" : "Expand sidebar"}
-              title={expanded ? undefined : "Expand"}
-            >
-              <span className="flex size-9 shrink-0 items-center justify-center rounded-xl transition-colors [&_svg]:size-4 [&_svg]:shrink-0">
-                {expanded ? <PanelLeftClose /> : <PanelLeftOpen />}
-              </span>
-              <span
-                className={cn(
-                  "truncate transition-[opacity,transform,width] duration-200",
-                  expanded ? "w-auto opacity-100" : "w-0 translate-x-1 opacity-0"
-                )}
-              >
-                Collapse
-              </span>
-            </button>
-          </div>
-        </LayoutGroup>
+        <div className="mt-auto flex flex-col gap-1.5">
+          <SidebarNavItem
+            path="/settings-view"
+            label="nav.settings"
+            icon={Settings}
+            expanded={expanded}
+          />
+          <button
+            type="button"
+            className={cn(
+              "sidebar-nav-link w-full",
+              expanded ? "justify-start" : "justify-center"
+            )}
+            onClick={toggleExpanded}
+            aria-label={t(expanded ? "nav.collapse" : "nav.expand")}
+            title={expanded ? undefined : t("nav.expand")}
+          >
+            {expanded ? (
+              <PanelLeftClose className="size-4 shrink-0" />
+            ) : (
+              <PanelLeftOpen className="size-4 shrink-0" />
+            )}
+            {expanded && <span className="truncate">{t("nav.collapse")}</span>}
+          </button>
+        </div>
       </div>
     </aside>
   );
@@ -153,11 +116,14 @@ export function WindowFrame({
   className,
   contentClassName,
   showSidebar = true,
+  embedded = false,
 }: WindowFrameProps) {
   const location = useLocation();
   const gameConfig = getGameByPath(location.pathname);
   const isHomePage =
-    location.pathname === "/" || (gameConfig != null && location.pathname === gameConfig.rootPath);
+    !embedded &&
+    (location.pathname === "/" ||
+      (gameConfig != null && location.pathname === gameConfig.rootPath));
   const bgVideoRef = useRef<HTMLVideoElement>(null);
 
   // Pause the background video whenever nobody can see it. Focus covers
@@ -197,8 +163,8 @@ export function WindowFrame({
   return (
     <div
       className={cn(
-        "bg-background flex h-screen w-screen flex-col overflow-hidden rounded-2xl",
-        isHomePage ? "bg-transparent" : "bg-background/95",
+        "flex h-screen w-screen flex-col overflow-hidden",
+        embedded ? "bg-background rounded-none" : "main-window-frame rounded-2xl",
         className
       )}
     >
@@ -236,15 +202,17 @@ export function WindowFrame({
       </div>
       <main className="min-h-0 flex-1">
         <div className="relative flex h-full min-h-0">
-          {showSidebar && <WindowSidebar isHomePage={isHomePage} />}
+          {showSidebar && <WindowSidebar />}
 
           <section className="relative z-10 min-h-0 min-w-0 flex-1 p-0 pt-0">
             <div
               className={cn(
-                "relative h-full min-h-0 overflow-hidden rounded-2xl",
-                isHomePage
+                "relative h-full min-h-0 overflow-hidden",
+                embedded
                   ? "bg-transparent shadow-none ring-0"
-                  : "bg-background/52 rounded-2xl shadow-[0_20px_70px_rgba(0,0,0,0.2)]",
+                  : isHomePage
+                    ? "rounded-2xl bg-transparent shadow-none ring-0"
+                    : "bg-background/52 rounded-2xl shadow-[0_20px_70px_rgba(0,0,0,0.2)]",
                 contentClassName
               )}
             >

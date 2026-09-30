@@ -205,6 +205,14 @@ impl DpsMeter {
         self.data_storage.main_actor_name()
     }
 
+    pub fn ping_ms(&self) -> Option<f64> {
+        self.ping_tracker.current_ping_ms()
+    }
+
+    pub fn summon_owner_ids(&self) -> std::collections::HashSet<u32> {
+        self.data_storage.summon_owner_snapshot().into_values().collect()
+    }
+
     /// Whether an automatic recording is running right now.
     pub fn is_auto_recording(&self) -> bool {
         self.auto_record.lock().unwrap().active_since.is_some()
@@ -365,7 +373,7 @@ impl DpsMeter {
         if snapshot.total_damage == 0 {
             return;
         }
-        let saved = self.history.save_and_clear(snapshot);
+        let saved = self.history.save_and_clear(snapshot, self.summon_owner_ids());
         let _ = self.app.emit("history-updated", ());
         if self.personal_bests.record_and_save(&saved) {
             let _ = self.app.emit("personal-bests-updated", ());

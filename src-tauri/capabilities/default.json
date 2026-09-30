@@ -4,7 +4,6 @@
   "description": "Capability for the main window",
   "windows": [
     "main",
-    "splashscreen",
     "about",
     "settings",
     "dps-overlay",
@@ -44,8 +43,6 @@
     "core:webview:allow-webview-position",
     "core:webview:allow-webview-size",
     "opener:default",
-    "updater:default",
-    "updater:allow-check",
     "global-shortcut:default",
     "global-shortcut:allow-is-registered",
     "global-shortcut:allow-register",

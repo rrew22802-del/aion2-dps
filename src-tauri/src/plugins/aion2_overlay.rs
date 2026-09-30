@@ -239,6 +239,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static OVERLAY_LOCKED: AtomicBool = AtomicBool::new(false);
 static DPS_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DETAIL_FOLLOW_OVERLAY: AtomicBool = AtomicBool::new(true);
 
 pub fn set_dps_overlay_locked_for_app<R: Runtime>(
     app: &AppHandle<R>,
@@ -346,16 +347,23 @@ const DETAIL_LABEL: &str = "dps-detail";
 
 #[tauri::command]
 pub async fn create_dps_detail<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    show_dps_detail(&app, None, crate::embedded::is_embedded())
+}
+
+pub fn show_dps_detail<R: Runtime>(app: &AppHandle<R>, position: Option<(i32, i32)>, focus: bool) -> Result<(), String> {
+    DETAIL_FOLLOW_OVERLAY.store(position.is_none(), Ordering::Relaxed);
     if let Some(window) = app.get_webview_window(DETAIL_LABEL) {
+        position_detail(app, position)?;
+        window.set_focusable(focus).map_err(|e| e.to_string())?;
         window.show().map_err(|e| e.to_string())?;
-        position_detail_right_of_overlay(&app)?;
+        if focus { window.set_focus().map_err(|e| e.to_string())?; }
         // Reload so init() picks up latest selection from get_detail_selection()
         let _ = window.eval("location.reload()");
         return Ok(());
     }
 
     let window = WebviewWindowBuilder::new(
-        &app,
+        app,
         DETAIL_LABEL,
         WebviewUrl::App("src/games/aion2/overlay/detail/index.html".into()),
     )
@@ -364,7 +372,7 @@ pub async fn create_dps_detail<R: Runtime>(app: AppHandle<R>) -> Result<(), Stri
     .transparent(true)
     .always_on_top(true)
     .focused(false)
-    .focusable(false)
+    .focusable(focus)
     .skip_taskbar(true)
     .inner_size(1080.0, 960.0)
     .resizable(true)
@@ -372,15 +380,16 @@ pub async fn create_dps_detail<R: Runtime>(app: AppHandle<R>) -> Result<(), Stri
     .build()
     .map_err(|e| e.to_string())?;
 
-    position_detail_right_of_overlay(&app)?;
+    position_detail(app, position)?;
     window.show().map_err(|e| e.to_string())?;
+    if focus { window.set_focus().map_err(|e| e.to_string())?; }
 
     // Track overlay movement only in follow mode
-    if get_detail_window_mode(&app) == "follow" {
-        let app_move = app.clone();
+    if position.is_none() && get_detail_window_mode(app) == "follow" {
+        let app_move = (*app).clone();
         if let Some(parent) = app.get_webview_window(DPS_OVERLAY_LABEL) {
             parent.on_window_event(move |event| {
-                if matches!(
+                if DETAIL_FOLLOW_OVERLAY.load(Ordering::Relaxed) && matches!(
                     event,
                     tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
                 ) {
@@ -391,6 +400,32 @@ pub async fn create_dps_detail<R: Runtime>(app: AppHandle<R>) -> Result<(), Stri
     }
 
     Ok(())
+}
+
+fn position_detail<R: Runtime>(app: &AppHandle<R>, position: Option<(i32, i32)>) -> Result<(), String> {
+    let child = app.get_webview_window(DETAIL_LABEL).ok_or("detail not found")?;
+    if position.is_some() || app.get_webview_window(DPS_OVERLAY_LABEL).is_none() {
+        let monitors = child.available_monitors().map_err(|e| e.to_string())?;
+        let monitor = monitors.iter().find(|m| {
+            let p = m.position();
+            let s = m.size();
+            position.is_some_and(|(x, y)| x >= p.x && y >= p.y && x < p.x + s.width as i32 && y < p.y + s.height as i32)
+        }).or_else(|| monitors.first()).ok_or("no monitor found")?;
+        let p = monitor.position();
+        let s = monitor.size();
+        let width = 1080u32.min(s.width);
+        let height = 960u32.min(s.height);
+        child.set_size(tauri::PhysicalSize::new(width, height)).map_err(|e| e.to_string())?;
+        let (x, y) = position.unwrap_or((
+            p.x + (s.width - width) as i32 / 2,
+            p.y + (s.height - height) as i32 / 2,
+        ));
+        return child.set_position(tauri::PhysicalPosition::new(
+            x.clamp(p.x, p.x + (s.width - width) as i32),
+            y.clamp(p.y, p.y + (s.height - height) as i32),
+        )).map_err(|e| e.to_string());
+    }
+    position_detail_right_of_overlay(app)
 }
 
 fn get_detail_window_mode<R: Runtime>(app: &AppHandle<R>) -> String {
