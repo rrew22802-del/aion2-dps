@@ -213,6 +213,14 @@ impl DpsMeter {
         self.data_storage.summon_owner_snapshot().into_values().collect()
     }
 
+    pub fn field_boss_timer_snapshot(&self) -> Vec<(u32, u32, u64, u64)> {
+        self.data_storage.field_boss_timer_snapshot()
+    }
+
+    pub fn mob_name(&self, mob_code: u32) -> Option<String> {
+        self.data_storage.mob_name(mob_code)
+    }
+
     /// Whether an automatic recording is running right now.
     pub fn is_auto_recording(&self) -> bool {
         self.auto_record.lock().unwrap().active_since.is_some()

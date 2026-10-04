@@ -230,6 +230,32 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
             (200, current_state(meter.get_dps_snapshot(0).as_ref(), &owners, pinned, lang), false)
         }
         (Method::Get, "/v1/targets") => (200, targets_json(meter.get_dps_snapshot(0).as_ref(), lang), false),
+        (Method::Get, "/v1/field-bosses") => {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or_default();
+            let timers: Vec<_> = meter.field_boss_timer_snapshot().into_iter().map(
+                |(map_id, npc_id, spawn_at_ms, last_seen_ms)| {
+                    let name = if lang == "ru" {
+                        None
+                    } else {
+                        meter.mob_name(npc_id).filter(|name| {
+                            name != &format!("Mob {npc_id}") && name != &format!("Boss {npc_id}")
+                        })
+                    };
+                    json!({
+                        "npcId": npc_id,
+                        "name": name,
+                        "mapId": (map_id != 0).then_some(map_id),
+                        "spawnAt": spawn_at_ms,
+                        "state": if spawn_at_ms > now_ms { "respawn" } else { "alive" },
+                        "lastSeen": last_seen_ms
+                    })
+                },
+            ).collect();
+            (200, json!(timers), false)
+        }
         (Method::Get, "/v1/history") => {
             let limit = query_value(query, "limit").unwrap_or("30").parse::<usize>();
             match limit {

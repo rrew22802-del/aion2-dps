@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::dps_meter::capture::parser::context::ParserContext;
+use crate::dps_meter::capture::parser::field_boss_timer;
 use crate::dps_meter::capture::parser::nickname;
 use crate::dps_meter::capture::parser::utils::read_varint;
 use crate::dps_meter::config::SharedDpsMeterConfig;
@@ -21,8 +22,7 @@ const KNOWN_PACKET_HEADERS: &[(u8, u8)] = &[
     (0x2B, 0x38),
     (0x04, 0x8D),
     (0x00, 0x8D),
-    // Field boss timers. No longer parsed since 2.2.0, but still a known
-    // opcode: it keeps the stall resync and the census treating it as ours.
+    // Field boss timers are parsed in full mode and remain known to stall resync/census.
     (0x01, 0x91),
     (0xFF, 0xFF),
 ];
@@ -434,6 +434,7 @@ impl StreamProcessor {
                     }
                     self.parse_remain_hp_packet(payload, is_compressed_bundle)
                 }
+                (0x01, 0x91) => field_boss_timer::parse_packet(&self.parser_context(), payload),
                 _ => false,
             },
             ProcessorMode::NicknameOnly => match (payload[0], payload[1]) {

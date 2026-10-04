@@ -14,6 +14,7 @@ The server listens only on `127.0.0.1:<port>`. The token must be nonempty ASCII.
 | --- | --- | --- |
 | GET | `/v1/health` | `{ "version": "2.4.0", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
 | GET | `/v1/state` | Current fight (shape below). When idle: `fightId`, `startedAt`, and `target` are `null`; `active` is `false`, numbers are zero, and `players` is empty. |
+| GET | `/v1/field-bosses` | Field-boss spawn timers last received from packet `01 91`; names are `null` with `--lang ru`. |
 | GET | `/v1/assets/aion2/class/{name}.png` or `/v1/assets/aion2/skill/{name}.png` | Bundled icon bytes. Only PNG files directly in those two folders are served; missing or invalid paths return 404. |
 | GET | `/v1/players/{id}/skills?fight=current` | Skills for the player on the current target. A live or archived `fightId` can replace `current`. |
 | GET | `/v1/players/{id}?fight=current` | Player detail for the current target. A live or archived `fightId` can replace `current`. |
@@ -53,6 +54,8 @@ For a tracker-hosted tab, launch the executable separately with `--embedded --pa
 ```
 
 The current fight is the last target of the main character, or the last observed target. Its `totalDamage` and players are for that target. `startedAt` is Unix milliseconds from its first observed hit; `durationSec` ends at its last observed hit. `share` is a fraction from 0 to 1. `classId` follows the game job groups used by the parser (for example Gladiator 2); unknown classes have `null` for `classId`, `className`, and `classIcon`. `isSummonOwner` refers to damage merged into a player's total from their summons. A `fightId` remains the same when the fight is archived.
+
+`GET /v1/field-bosses` returns an array of `{ "npcId", "name", "mapId", "spawnAt", "state", "lastSeen" }`. `spawnAt` and `lastSeen` are Unix milliseconds. The rows reflect the latest `01 91` timer table captured for each map and remain in memory across DPS resets. `state` is `respawn` while `spawnAt` is in the future and `alive` after that time passes. The timer packet contains scheduled timestamps but no explicit alive/dead flag, so this endpoint cannot report `dead` from packet data alone. `name` is `null` with `--lang ru` and when the English catalogue has no name.
 
 Skills are a JSON array of `{ "skillId", "name", "damage", "hits", "critRate", "maxHit", "share" }`. Skill `share` is a fraction of that player's damage on this target. `critRate` is `null` if no hits were counted. Empty known fights return `[]`; unknown fights return 404. Invalid IDs or missing `fight` return 400.
 
