@@ -224,9 +224,12 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
                 "message": h.message, "game": meter.has_game_traffic(), "pingMs": meter.ping_ms()}), false)
         }
         (Method::Get, "/v1/state") => {
+            // ?target=<id> pins one target of the session (owner 05.10: look at the boss alone, without resetting before it)
             let owners = meter.summon_owner_ids();
-            (200, current_state(meter.get_dps_snapshot(0).as_ref(), &owners, lang), false)
+            let pinned = query_value(query, "target").and_then(|v| v.parse::<u32>().ok());
+            (200, current_state(meter.get_dps_snapshot(0).as_ref(), &owners, pinned, lang), false)
         }
+        (Method::Get, "/v1/targets") => (200, targets_json(meter.get_dps_snapshot(0).as_ref(), lang), false),
         (Method::Get, "/v1/history") => {
             let limit = query_value(query, "limit").unwrap_or("30").parse::<usize>();
             match limit {
@@ -453,21 +456,50 @@ fn current_target(snapshot: &CombatSnapshot) -> Option<u32> {
         .or_else(|| snapshot.by_target_player_stats.keys().copied().next())
 }
 
-fn current_state(snapshot: Option<&CombatSnapshot>, owners: &HashSet<u32>, lang: &str) -> Value {
+// every target of the current session: bosses first, then the latest fights; the tracker shows them as chips
+fn targets_json(snapshot: Option<&CombatSnapshot>, lang: &str) -> Value {
+    let Some(snapshot) = snapshot else { return json!([]); };
+    let current = current_target(snapshot);
+    let fallback = (snapshot.combat_infos.time_now * 1000.0) as u64;
+    let mut rows: Vec<(bool, f64, Value)> = snapshot.by_target_player_stats.iter().map(|(id, stats)| {
+        let target = snapshot.combat_infos.target_infos.get(id);
+        let (started, duration) = timing(target, fallback);
+        let last = target.and_then(|t| t.target_last_time.values().copied().reduce(f64::max)).unwrap_or(0.0);
+        let boss = target.is_some_and(|t| t.is_boss && t.target_mob_code.is_some());
+        let own = snapshot.combat_infos.main_actor_id.and_then(|me| stats.get(&me)).map(|p| p.total_damage);
+        (boss, last, json!({"id": id, "target": target_json(target, lang), "isBoss": boss, "current": current == Some(*id),
+            "startedAt": started, "durationSec": duration, "lastHitAt": (last * 1000.0) as u64,
+            "totalDamage": stats.values().map(|p| p.total_damage).sum::<u64>(), "ownDamage": own}))
+    }).collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)));
+    json!(rows.into_iter().take(20).map(|r| r.2).collect::<Vec<_>>())
+}
+
+fn current_state(snapshot: Option<&CombatSnapshot>, owners: &HashSet<u32>, pinned: Option<u32>, lang: &str) -> Value {
     let Some(snapshot) = snapshot else {
         return json!({"fightId": null, "active": false, "startedAt": null,
             "durationSec": 0.0, "target": null, "totalDamage": 0, "players": []});
     };
-    let Some(id) = current_target(snapshot) else {
+    let Some(id) = pinned.filter(|id| snapshot.by_target_player_stats.contains_key(id)).or_else(|| current_target(snapshot)) else {
         return json!({"fightId": null, "active": false, "startedAt": null,
             "durationSec": 0.0, "target": null, "totalDamage": 0, "players": []});
     };
     let target = snapshot.combat_infos.target_infos.get(&id);
     let fallback = (snapshot.combat_infos.time_now * 1000.0) as u64;
     let (started, _) = timing(target, fallback);
-    fight_state(format!("{id}-{started}"), true, target,
+    let mut state = fight_state(format!("{id}-{started}"), true, target,
         &snapshot.by_target_player_stats[&id], snapshot.combat_infos.main_actor_id,
-        Some(owners), fallback, lang)
+        Some(owners), fallback, lang);
+    let boss = snapshot.by_target_player_stats.keys()
+        .filter_map(|tid| snapshot.combat_infos.target_infos.get(tid).filter(|t| t.is_boss && t.target_mob_code.is_some()))
+        .max_by(|a, b| {
+            let last = |t: &TargetInfo| t.target_last_time.values().copied().reduce(f64::max).unwrap_or(0.0);
+            last(a).total_cmp(&last(b))
+        });
+    state["targetId"] = json!(id);
+    state["pinned"] = json!(pinned == Some(id));
+    state["boss"] = boss.map(|t| json!({"id": t.id, "target": target_json(Some(t), lang)})).unwrap_or(Value::Null);
+    state
 }
 
 fn record_state(record: &HistoryRecord, lang: &str) -> Value {
