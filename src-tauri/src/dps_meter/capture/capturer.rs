@@ -70,6 +70,10 @@ struct PcapPkthdr {
 
 const PCAP_IF_LOOPBACK: c_uint = 0x0000_0001;
 const MAGIC_PATTERN: [u8; 3] = [0x0E, 0x00, 0x36];
+/// A flow counts as the game only after this many packets *start* with the magic within one detection window.
+/// The game puts it at offset 0 of nearly every server packet (~20/s); matching it anywhere in a payload let
+/// encrypted VPN traffic (xray/booster tunnels, 1 hit per ~12k packets) be taken for the game (owner log 05.10).
+const MAGIC_MIN_HITS: u32 = 3;
 
 #[derive(Clone)]
 struct DeviceInfo {
@@ -494,22 +498,23 @@ fn inspect_device_for_magic(
 ) -> Option<String> {
     let handle = npcap.open_live_handle(&device.name, 100).ok()?;
     let started_at = Instant::now();
+    let mut hits: std::collections::HashMap<(u16, u16), u32> = std::collections::HashMap::new();
 
     while running.load(Ordering::SeqCst) && started_at.elapsed() < timeout {
         match next_captured_packet(npcap, handle) {
             CaptureRead::Packet(packet) => {
-                if packet
-                    .data
-                    .windows(MAGIC_PATTERN.len())
-                    .any(|window| window == MAGIC_PATTERN)
-                {
+                if packet.data.starts_with(&MAGIC_PATTERN) {
                     let (a, b) = if packet.src_port <= packet.dst_port {
                         (packet.src_port, packet.dst_port)
                     } else {
                         (packet.dst_port, packet.src_port)
                     };
-                    unsafe { (npcap.close)(handle) };
-                    return Some(format!("{a}-{b}"));
+                    let count = hits.entry((a, b)).or_insert(0);
+                    *count += 1;
+                    if *count >= MAGIC_MIN_HITS {
+                        unsafe { (npcap.close)(handle) };
+                        return Some(format!("{a}-{b}"));
+                    }
                 }
             }
             CaptureRead::Timeout => continue,
