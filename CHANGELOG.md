@@ -9,6 +9,10 @@ lives in the [NOIA2 repository](https://github.com/ZDYoung0519/NOIA2).
      and some players still update from there: so no hard wraps and no bold in
      2.0.0 and later. From 2.0.0 on the dialog renders Markdown. -->
 
+## [2.5.0]
+
+- Added the live `/v1/live` service endpoint for current buffs, self-applied effects, own skill hit cooldown data, and target health.
+
 ## [2.4.0]
 
 Safer next to anti-cheat, and a straight answer about fullscreen games.

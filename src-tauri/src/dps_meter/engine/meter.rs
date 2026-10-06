@@ -205,6 +205,20 @@ impl DpsMeter {
         self.data_storage.main_actor_name()
     }
 
+    pub fn live_combat_assist_snapshot(
+        &self,
+        pinned_target: Option<u32>,
+        now_ms: u64,
+    ) -> (
+        Option<u32>,
+        Option<(u32, Option<u32>, Option<(u32, u32)>, bool)>,
+        Vec<(u32, u32, u32, u64, u64)>,
+        Vec<(u32, u32, u32, u64, u64)>,
+        Vec<(u32, u64, u32)>,
+    ) {
+        self.data_storage.live_combat_assist_snapshot(pinned_target, now_ms)
+    }
+
     pub fn ping_ms(&self) -> Option<f64> {
         self.ping_tracker.current_ping_ms()
     }

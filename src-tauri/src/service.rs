@@ -218,6 +218,33 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
     let meter = app.state::<DpsMeter>();
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
     match (method, path) {
+        (Method::Get, "/v1/live") => {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or_default();
+            let pinned = query_value(query, "target").and_then(|value| value.parse::<u32>().ok());
+            let (self_id, target, buffs, debuffs, casts) = meter.live_combat_assist_snapshot(pinned, now_ms);
+            let buff_rows = |rows: Vec<(u32, u32, u32, u64, u64)>| rows.into_iter().map(
+                |(_, actor, skill, start_ms, end_ms)| json!({
+                    "skill": skill, "name": skill_name(skill, lang).unwrap_or(""),
+                    "icon": skill_icon(skill), "actor": actor, "fromSelf": self_id == Some(actor),
+                    "startMs": start_ms, "endMs": end_ms,
+                    "durationMs": end_ms.saturating_sub(start_ms)
+                }),
+            ).collect::<Vec<_>>();
+            let target_json = target.map(|(id, mob_code, hp, is_boss)| {
+                let hp_pct = hp.and_then(|(current, max)| (max > 0).then(|| current as f64 * 100.0 / max as f64));
+                let name = if lang == "en" { mob_code.and_then(|code| meter.mob_name(code)) } else { None };
+                json!({"id": id, "name": name, "hpPct": hp_pct, "isBoss": is_boss})
+            });
+            let cast_rows: Vec<_> = casts.into_iter().map(|(skill, last_ms, count)| json!({
+                "skill": skill, "name": skill_name(skill, lang).unwrap_or(""),
+                "icon": skill_icon(skill), "lastMs": last_ms, "count": count
+            })).collect();
+            (200, json!({"now": now_ms, "selfId": self_id, "buffs": buff_rows(buffs),
+                "debuffs": buff_rows(debuffs), "casts": cast_rows, "target": target_json}), false)
+        }
         (Method::Get, "/v1/health") => {
             let h = health.read().unwrap();
             (200, json!({"version": env!("CARGO_PKG_VERSION"), "capture": h.capture,

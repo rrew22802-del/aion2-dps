@@ -140,6 +140,7 @@ struct DataStorageInner {
     mob_id_hp_map: BoundedMap<u32, (u32, u32)>,
     player_hp_map: BoundedMap<u32, PlayerHpInfo>,
     use_buffs_by_target: BoundedMap<u32, HashMap<u32, HashMap<u32, VecDeque<BuffInterval>>>>,
+    own_skill_uses: HashMap<u32, (u64, u32)>,
     possible_boss_codes: HashSet<u32>,
     summon_owner_map: BoundedMap<u32, u32>,
     start_time: Option<f64>,
@@ -186,6 +187,7 @@ impl Default for DataStorageInner {
             mob_id_hp_map: BoundedMap::new(MOB_METADATA_CAPACITY),
             player_hp_map: BoundedMap::new(ACTOR_METADATA_CAPACITY),
             use_buffs_by_target: BoundedMap::new(BUFF_TARGET_CAPACITY),
+            own_skill_uses: HashMap::new(),
             possible_boss_codes: HashSet::new(),
             summon_owner_map: BoundedMap::new(SUMMON_METADATA_CAPACITY),
             start_time: None,
@@ -515,6 +517,13 @@ impl DataStorage {
                     inner.last_player_target_by_main_actor = Some(packet.target_id);
                 }
             }
+        }
+
+        if inner.main_actor_id == Some(packet.actor_id) {
+            let last_ms = (timestamp * 1000.0).max(0.0) as u64;
+            let entry = inner.own_skill_uses.entry(stats_skill_code).or_insert((last_ms, 0));
+            entry.0 = entry.0.max(last_ms);
+            entry.1 = entry.1.saturating_add(1);
         }
 
         if is_own_fight(&inner, actor_id, packet.target_id) {
@@ -983,6 +992,56 @@ impl DataStorage {
 
     pub fn main_actor_id(&self) -> Option<u32> {
         self.inner.read().unwrap().main_actor_id
+    }
+
+    /// Small live-service view; reads only the selected target, active buff intervals,
+    /// and the bounded per-skill counters instead of cloning combat histories.
+    pub fn live_combat_assist_snapshot(
+        &self,
+        pinned_target: Option<u32>,
+        now_ms: u64,
+    ) -> (
+        Option<u32>,
+        Option<(u32, Option<u32>, Option<(u32, u32)>, bool)>,
+        Vec<(u32, u32, u32, u64, u64)>,
+        Vec<(u32, u32, u32, u64, u64)>,
+        Vec<(u32, u64, u32)>,
+    ) {
+        let show_possible_boss = self.config.read().unwrap().show_possible_boss;
+        let inner = self.inner.read().unwrap();
+        let self_id = inner.main_actor_id;
+        let target_id = pinned_target.filter(|id| inner.mob_id_code_map.contains_key(id))
+            .or(inner.last_target_by_main_actor);
+        let target = target_id.map(|id| {
+            let mob_code = inner.mob_id_code_map.get(&id).copied();
+            let hp = inner.mob_id_hp_map.get(&id).copied();
+            let is_boss = mob_code.is_some_and(|code| self.boss_code_list.contains(&code)
+                || (show_possible_boss && inner.possible_boss_codes.contains(&code)));
+            (id, mob_code, hp, is_boss)
+        });
+        let active_buffs = |target_id: Option<u32>, actor_filter: Option<u32>| {
+            let mut rows = Vec::new();
+            if let Some(target_id) = target_id {
+                if let Some(actors) = inner.use_buffs_by_target.get(&target_id) {
+                    for (actor_id, skills) in actors {
+                        if actor_filter.is_some_and(|actor| actor != *actor_id) { continue; }
+                        for (skill_code, intervals) in skills {
+                            if let Some(interval) = intervals.iter().rev().find(|entry| entry.end_ms > now_ms) {
+                                rows.push((target_id, *actor_id, *skill_code, interval.start_ms, interval.end_ms));
+                            }
+                        }
+                    }
+                }
+            }
+            rows
+        };
+        let buffs = active_buffs(self_id, None);
+        let debuffs = if self_id.is_some() { active_buffs(target.map(|row| row.0), self_id) } else { Vec::new() };
+        let mut casts: Vec<_> = inner.own_skill_uses.iter()
+            .map(|(skill, (last_ms, count))| (*skill, *last_ms, *count)).collect();
+        casts.sort_by(|a, b| b.1.cmp(&a.1));
+        casts.truncate(60);
+        (self_id, target, buffs, debuffs, casts)
     }
 
     pub fn main_actor_name(&self) -> Option<String> {
