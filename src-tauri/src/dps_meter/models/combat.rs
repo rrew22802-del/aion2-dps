@@ -117,6 +117,10 @@ pub struct ActorInfo {
     #[serde(default)]
     pub combat_power: Option<u64>,
     pub actor_skill_spec: HashMap<u32, Vec<u32>>,
+    #[serde(default)]
+    pub heal_total: u64,
+    #[serde(default)]
+    pub deaths: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +166,23 @@ pub struct PlayerOverviewStat {
     pub dps: f64,
     pub damage_share: f64,
     pub damage_contribution: f64,
+    #[serde(default)]
+    pub heal_total: u64,
+    #[serde(default)]
+    pub hps: f64,
+    #[serde(default)]
+    pub deaths: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CombatEvent {
+    pub actor_id: u32,
+    pub target_id: u32,
+    pub skill_code: u32,
+    pub damage: u64,
+    pub is_crit: bool,
+    pub at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,4 +218,8 @@ pub struct CombatSnapshot {
     pub main_actor_received_player_overview_stats: Vec<PlayerOverviewStat>,
     #[serde(default)]
     pub main_actor_dealt_player_overview_stats: Vec<PvpDamageOverviewStat>,
+    #[serde(default, skip_serializing)]
+    pub combat_events: Vec<CombatEvent>,
+    #[serde(default, skip_serializing)]
+    pub buff_intervals: HashMap<u32, HashMap<u32, HashMap<u32, Vec<BuffInterval>>>>,
 }

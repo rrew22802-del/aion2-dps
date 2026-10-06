@@ -261,14 +261,6 @@ impl StreamProcessor {
             && self.data_storage.get_mob_code(target_id).is_none();
 
         if is_target_player {
-            if !self.config.read().unwrap().pvp_mode_on {
-                // self.logger.debug(format!(
-                //     "[{}] player remain hp skipped pvp_mode_off actor={} current_hp={}",
-                //     self.port, target_id, target_hp
-                // ));
-                return true;
-            }
-
             if target_hp == 0 {
                 let (newly_dead, killer) = self.data_storage.mark_player_dead(target_id);
                 if newly_dead {
@@ -282,6 +274,8 @@ impl StreamProcessor {
             } else {
                 self.data_storage.mark_player_alive(target_id);
             }
+
+            if !self.config.read().unwrap().pvp_mode_on { return true; }
 
             if self.data_storage.main_actor_id() == Some(target_id) {
                 // self.logger.debug(format!(

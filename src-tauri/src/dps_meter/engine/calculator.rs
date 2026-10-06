@@ -100,8 +100,50 @@ fn build_combat_snapshot(
     let actor_infos = build_actor_infos(data_storage, &filtered_skill_stats, &summon_owner_map);
 
     // 8. Build per-target per-actor overview stats (with DPS, share, name, etc.)
-    let per_target_overview =
+    let mut per_target_overview =
         build_per_target_overview_stats(&aggregated, &target_infos, &actor_infos);
+    let healing_by_target = data_storage.healing_by_target_snapshot();
+    for (target_id, players) in &mut per_target_overview {
+        let target_duration = target_infos.get(target_id).map(|target| {
+            let start = target.target_start_time.values().copied().reduce(f64::min).unwrap_or(0.0);
+            let end = target.target_last_time.values().copied().reduce(f64::max).unwrap_or(start);
+            (end - start).max(1.0)
+        }).unwrap_or(1.0);
+        if let Some(healers) = healing_by_target.get(target_id) {
+            for (actor_id, heal_total) in healers {
+                let info = actor_infos.get(actor_id);
+                let player = players.entry(*actor_id).or_insert_with(|| PlayerOverviewStat {
+                    actor_id: *actor_id,
+                    actor_name: info.and_then(|a| a.actor_name.clone()).unwrap_or_default(),
+                    actor_server_id: info.and_then(|a| a.actor_server_id.clone()).unwrap_or_default(),
+                    actor_class: info.and_then(|a| a.actor_class.clone()).unwrap_or_default(),
+                    combat_power: info.and_then(|a| a.combat_power),
+                    counts: 0, total_damage: 0, min_damage: 0, max_damage: 0,
+                    special_counts: HashMap::new(), dps: 0.0, damage_share: 0.0,
+                    damage_contribution: 0.0, heal_total: 0, hps: 0.0,
+                    deaths: info.map(|a| a.deaths).unwrap_or(0),
+                });
+                player.heal_total = *heal_total;
+                player.hps = *heal_total as f64 / target_duration;
+            }
+        }
+    }
+    let latest_target = data_storage.last_target_by_main_actor().or_else(|| data_storage.last_target());
+    if let Some(target_id) = latest_target {
+        if let Some(players) = per_target_overview.get_mut(&target_id) {
+            for (actor_id, info) in &actor_infos {
+                if info.deaths > 0 && !players.contains_key(actor_id) {
+                    players.insert(*actor_id, PlayerOverviewStat {
+                        actor_id: *actor_id, actor_name: info.actor_name.clone().unwrap_or_default(),
+                        actor_server_id: info.actor_server_id.clone().unwrap_or_default(),
+                        actor_class: info.actor_class.clone().unwrap_or_default(), combat_power: info.combat_power,
+                        counts: 0, total_damage: 0, min_damage: 0, max_damage: 0, special_counts: HashMap::new(),
+                        dps: 0.0, damage_share: 0.0, damage_contribution: 0.0, heal_total: 0, hps: 0.0, deaths: info.deaths,
+                    });
+                }
+            }
+        }
+    }
 
     // 9. Extract last-target overview for frontend convenience (already sorted by damage desc)
     let last_target_id = data_storage
@@ -196,6 +238,10 @@ fn build_combat_snapshot(
         last_target_all_players_overview_stats: last_target_overview,
         main_actor_received_player_overview_stats: main_actor_received_overview,
         main_actor_dealt_player_overview_stats: main_actor_dealt_overview,
+        combat_events: data_storage.combat_events_snapshot(),
+        buff_intervals: data_storage.buff_intervals_snapshot().into_iter().map(|(target, actors)|
+            (target, actors.into_iter().map(|(actor, skills)| (actor, skills.into_iter().map(|(skill, intervals)| (skill, intervals.into_iter().collect())).collect())).collect())
+        ).collect(),
     })
 }
 
@@ -364,6 +410,8 @@ fn build_actor_infos(
     let id_server = data_storage.actor_id_server_snapshot();
     let id_class = data_storage.actor_id_class_snapshot();
     let id_combat_power = data_storage.actor_id_combat_power_snapshot();
+    let healing_totals = data_storage.healing_totals_snapshot();
+    let player_deaths = data_storage.player_deaths_snapshot();
     let main_actor_id = data_storage.main_actor_id();
     let main_actor_combat_power = data_storage.main_actor_combat_power();
     let id_skill_spec =
@@ -374,6 +422,8 @@ fn build_actor_infos(
         .flat_map(|actors| actors.keys())
         .copied()
         .collect();
+    actor_ids.extend(healing_totals.keys().copied());
+    actor_ids.extend(player_deaths.keys().copied());
     actor_ids.sort_unstable();
     actor_ids.dedup();
 
@@ -393,6 +443,8 @@ fn build_actor_infos(
                         id_combat_power.get(&aid).copied()
                     },
                     actor_skill_spec: id_skill_spec.get(&aid).cloned().unwrap_or_default(),
+                    heal_total: healing_totals.get(&aid).copied().unwrap_or(0),
+                    deaths: player_deaths.get(&aid).copied().unwrap_or(0),
                 },
             )
         })
@@ -494,6 +546,9 @@ fn build_per_target_overview_stats(
                             dps,
                             damage_share,
                             damage_contribution,
+                            heal_total: 0,
+                            hps: 0.0,
+                            deaths: info.map(|a| a.deaths).unwrap_or(0),
                         },
                     )
                 })

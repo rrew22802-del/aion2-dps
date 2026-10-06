@@ -12,7 +12,7 @@ The server listens only on `127.0.0.1:<port>`. The token must be nonempty ASCII.
 
 | Method | Path | Response |
 | --- | --- | --- |
-| GET | `/v1/health` | `{ "version": "2.5.0", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
+| GET | `/v1/health` | `{ "version": "2.6.0", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
 | GET | `/v1/state` | Current fight (shape below). When idle: `fightId`, `startedAt`, and `target` are `null`; `active` is `false`, numbers are zero, and `players` is empty. |
 | GET | `/v1/live` | Current self buffs, self-applied effects on the current or pinned target, recent own skill uses, and target HP. `?target=<id>` pins a known mob target. |
 | GET | `/v1/field-bosses` | Field-boss spawn timers last received from packet `01 91`; names are `null` with `--lang ru`. |
@@ -20,6 +20,7 @@ The server listens only on `127.0.0.1:<port>`. The token must be nonempty ASCII.
 | GET | `/v1/players/{id}/skills?fight=current` | Skills for the player on the current target. A live or archived `fightId` can replace `current`. |
 | GET | `/v1/players/{id}?fight=current` | Player detail for the current target. A live or archived `fightId` can replace `current`. |
 | GET | `/v1/players/{id}/buffs?fight=current` | Player and boss buff uptime for the current or an archived fight. |
+| GET | `/v1/fights/{fightId}/timeline?player={id}` | One-second player/group damage, player's casts, and available buff intervals. `fightId` may be `current`. |
 | GET | `/v1/pvp` | PvP kill stats and current fight's damage dealt/taken lists. |
 | POST | `/v1/pvp/clear` | Clears the engine's accumulated PvP kill stats; returns `{}`. |
 | GET | `/v1/pvp/watch` | Service watch names and current HP of matching players. |
@@ -49,10 +50,15 @@ For a tracker-hosted tab, launch the executable separately with `--embedded --pa
   "players": [{
     "id": 16450, "name": "…", "classId": 2, "className": "Gladiator", "classIcon": "aion2/class/gladiator.png",
     "isSelf": true, "isSummonOwner": false, "damage": 34567,
-    "dps": 812.3, "share": 0.28, "hits": 140, "critRate": 0.31, "maxHit": 5120
+    "dps": 812.3, "share": 0.28, "hits": 140, "critRate": 0.31, "maxHit": 5120,
+    "cp": 18452, "deaths": 0, "healTotal": 9200, "hps": 216.5
   }]
 }
 ```
+
+`/v1/state` and archived fight players also expose `cp` (combat power, or `null` when not observed), `deaths`, `healTotal`, and `hps`. Healing totals cover healing packets with a decoded amount and are counted across targets; HPS divides by that player's observed fight duration. A packet without an amount contributes nothing.
+
+`GET /v1/fights/{fightId}/timeline?player={id}` returns `{ "durationMs", "damagePerSecond": [{"offsetMs", "playerDamage", "groupDamage"}], "casts": [{"offsetMs", "skillCode", "damage", "crit"}], "buffs": [{"startOffsetMs", "endOffsetMs", "skillCode", "sourceId"}] }`. Resolution and included duration are capped at 20 minutes (1,200 one-second buckets); casts are capped at 25,000. Buff intervals are returned when the existing buff parser stored them. An unknown fight or player returns 404; a missing or invalid player query returns 400.
 
 `GET /v1/live` returns active effect intervals and own skill uses from the current session. Names follow `--lang en|ru`; missing catalogue entries are empty strings for skills and `null` for the target name. Timestamps are Unix milliseconds. Example:
 
@@ -87,6 +93,6 @@ Each skill also has `icon` (an asset path such as `aion2/skill/1101.png`), `spec
 
 When capture starts after login, 20 or more `00 8D` packets can identify the local player if one entity accounts for at least 60% of them. The login packet remains authoritative when received later. Class inference uses the existing skill-ID prefix table when a job byte is unavailable; unrecognized classes stay `null`.
 
-History rows are `{ "fightId", "startedAt", "durationSec", "target", "isBoss", "totalDamage", "selfDps", "selfShare" }`. History is the existing engine history; it saves fights over 1,000,000 damage and retains up to 500 records. A reset may therefore produce no history row.
+History rows are `{ "fightId", "startedAt", "durationSec", "target", "isBoss", "totalDamage", "selfDps", "selfShare", "healTotal", "hps", "deaths", "selfCp", "selfDeaths" }`. `healTotal` and `deaths` are group totals; the `self*` fields refer to the main character when known. History is the existing engine history; it saves fights over 1,000,000 damage and retains up to 500 records. A reset may therefore produce no history row.
 
 Player names come from captured game data. English target names come from the bundled NPC catalogue and English skill names from the same catalogue used by the overlays. The existing project has no Russian NPC or skill catalogue. With `--lang ru`, class names are Russian and target/skill names without a Russian entry are `null` on the existing fight and detail routes; `/v1/live` uses empty strings for missing skill names and `null` for target names. The English catalogue is not mislabeled as Russian. All numeric measurements and IDs are language independent.

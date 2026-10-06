@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::dps_meter::models::combat::{
-    BuffSummary, CombatInfos, CombatSnapshot, PlayerOverviewStat, SkillStats, TargetInfo,
+    BuffInterval, BuffSummary, CombatEvent, CombatInfos, CombatSnapshot, PlayerOverviewStat, SkillStats, TargetInfo,
 };
 
 const MAGIC: &[u8; 4] = b"DPSH";
@@ -33,6 +33,10 @@ pub struct HistoryRecord {
     #[serde(default)]
     pub use_buffs_by_target: HashMap<u32, Vec<BuffSummary>>,
     pub created_at: u64,
+    #[serde(default)]
+    pub combat_events: Vec<CombatEvent>,
+    #[serde(default)]
+    pub buff_intervals: HashMap<u32, HashMap<u32, HashMap<u32, Vec<BuffInterval>>>>,
 }
 
 // =============================================================================
@@ -178,6 +182,10 @@ impl HistoryStore {
                     player_skill_stats: skill_stats,
                     use_buffs_by_target,
                     created_at: now_ms,
+                    combat_events: snapshot.combat_events.iter()
+                        .filter(|event| event.target_id == target_id && event.at_ms >= started_ms && event.at_ms <= started_ms.saturating_add(1_200_000))
+                        .take(25_000).cloned().collect(),
+                    buff_intervals: snapshot.buff_intervals.iter().filter(|(buff_target, _)| relevant_buff_targets.contains(buff_target)).map(|(target, actors)| (*target, actors.clone())).collect(),
                 })
             })
             .collect()

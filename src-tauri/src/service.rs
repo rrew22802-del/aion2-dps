@@ -383,6 +383,19 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
                 None => (404, json!({"error": "fight not found"}), false),
             }
         }
+        (Method::Get, _) if path.starts_with("/v1/fights/") && path.ends_with("/timeline") => {
+            let fight = path.trim_start_matches("/v1/fights/").trim_end_matches("/timeline").trim_end_matches('/');
+            match (fight, query_value(query, "player").and_then(|id| id.parse::<u32>().ok())) {
+                (fight, Some(player)) if !fight.is_empty() => match selected_fight(&meter, fight) {
+                    Some(selected) => match fight_timeline(&selected, player) {
+                        Some(timeline) => (200, timeline, false),
+                        None => (404, json!({"error":"player not found"}), false),
+                    },
+                    None => (404, json!({"error":"fight not found"}), false),
+                },
+                _ => (400, json!({"error":"player is required"}), false),
+            }
+        }
         (Method::Get, _) if path.starts_with("/v1/players/") && path.ends_with("/skills") => {
             let id = path.trim_start_matches("/v1/players/").trim_end_matches("/skills");
             match (id.parse::<u32>(), query_value(query, "fight")) {
@@ -480,7 +493,8 @@ fn player_json(p: &PlayerOverviewStat, self_id: Option<u32>, owners: Option<&Has
         "isSummonOwner": owners.map(|ids| ids.contains(&p.actor_id)), "damage": p.total_damage,
         "dps": p.dps, "share": p.damage_share, "hits": p.counts,
         "critRate": (p.counts > 0).then(|| *p.special_counts.get("CRITICAL").unwrap_or(&0) as f64 / p.counts as f64),
-        "maxHit": p.max_damage})
+        "maxHit": p.max_damage, "cp": p.combat_power, "deaths": p.deaths,
+        "healTotal": p.heal_total, "hps": p.hps})
 }
 
 fn fight_state(id: String, active: bool, target: Option<&TargetInfo>,
@@ -567,7 +581,57 @@ fn history_row(record: &HistoryRecord, lang: &str) -> Value {
         "target": record.target_info.as_ref().and_then(|t| target_name(t, lang)),
         "isBoss": record.target_info.as_ref().and_then(|t| t.target_mob_code.map(|_| t.is_boss)),
         "totalDamage": record.total_damage, "selfDps": self_stat.map(|s| s.dps),
-        "selfShare": self_stat.map(|s| s.damage_share)})
+        "selfShare": self_stat.map(|s| s.damage_share),
+        "healTotal": record.player_stats.values().map(|p| p.heal_total).sum::<u64>(),
+        "hps": self_stat.map(|s| s.hps), "deaths": record.player_stats.values().map(|p| p.deaths).sum::<u32>(),
+        "selfCp": self_stat.and_then(|s| s.combat_power), "selfDeaths": self_stat.map(|s| s.deaths)})
+}
+
+fn fight_timeline(fight: &SelectedFight, player: u32) -> Option<Value> {
+    let (target, events, intervals, duration, exists) = match fight {
+        SelectedFight::Current(snapshot, target, _) => {
+            let target_info = snapshot.combat_infos.target_infos.get(target);
+            let events = snapshot.combat_events.iter().filter(|event| event.target_id == *target).cloned().collect::<Vec<_>>();
+            let duration = target_info.and_then(|t| t.target_last_time.values().copied().reduce(f64::max).zip(t.target_start_time.values().copied().reduce(f64::min))).map(|(end,start)| ((end-start).max(1.0)*1000.0) as u64).unwrap_or(0);
+            (*target, events, snapshot.buff_intervals.clone(), duration, snapshot.by_target_player_stats.get(target).is_some_and(|stats| stats.contains_key(&player)))
+        }
+        SelectedFight::History(record) => {
+            let start = record.target_info.as_ref().and_then(|t| t.target_start_time.values().copied().reduce(f64::min)).unwrap_or(0.0);
+            let end = record.target_info.as_ref().and_then(|t| t.target_last_time.values().copied().reduce(f64::max)).unwrap_or(start);
+            (record.target_id, record.combat_events.clone(), record.buff_intervals.clone(), ((end-start).max(1.0)*1000.0) as u64, record.player_stats.contains_key(&player))
+        }
+    };
+    if !exists { return None; }
+    let start_ms = match fight {
+        SelectedFight::Current(snapshot, _, _) => snapshot.combat_infos.target_infos.get(&target).and_then(|t| t.target_start_time.values().copied().reduce(f64::min)).unwrap_or(0.0),
+        SelectedFight::History(record) => record.target_info.as_ref().and_then(|t| t.target_start_time.values().copied().reduce(f64::min)).unwrap_or(0.0),
+    } * 1000.0;
+    let duration_ms = duration.min(1_200_000);
+    let seconds = ((duration_ms + 999) / 1000) as usize;
+    let mut buckets = vec![(0u64, 0u64); seconds];
+    let casts: Vec<_> = events.iter().filter_map(|event| {
+        let offset = (event.at_ms as f64 - start_ms).max(0.0) as u64;
+        if offset > duration_ms { return None; }
+        let bucket = (offset / 1000) as usize;
+        if bucket < buckets.len() { buckets[bucket].1 = buckets[bucket].1.saturating_add(event.damage); if event.actor_id == player { buckets[bucket].0 = buckets[bucket].0.saturating_add(event.damage); } }
+        (event.actor_id == player).then_some(json!({"offsetMs":offset,"skillCode":event.skill_code,"damage":event.damage,"crit":event.is_crit}))
+    }).take(25_000).collect();
+    let per_second: Vec<_> = buckets.into_iter().enumerate().map(|(second,(own,group))| json!({"offsetMs":second*1000,"playerDamage":own,"groupDamage":group})).collect();
+    let own_buffs = intervals.get(&player).map(|actors| {
+        let mut rows_out = Vec::new();
+        for (actor, skills) in actors {
+            for (skill, rows) in skills {
+                for row in rows {
+                    let start = row.start_ms.saturating_sub(start_ms as u64);
+                    if start > duration_ms { continue; }
+                    let end = row.end_ms.saturating_sub(start_ms as u64).min(duration_ms);
+                    if end >= start { rows_out.push(json!({"startOffsetMs":start,"endOffsetMs":end,"skillCode":skill,"sourceId":actor})); }
+                }
+            }
+        }
+        rows_out
+    }).unwrap_or_default();
+    Some(json!({"durationMs":duration_ms,"damagePerSecond":per_second,"casts":casts,"buffs":own_buffs}))
 }
 
 fn skill_names() -> &'static HashMap<String, String> {

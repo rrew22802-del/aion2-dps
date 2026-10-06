@@ -12,6 +12,7 @@ use crate::dps_meter::models::combat::{
     PvpWatchInfo, PvpWatchInfoResponse, SkillStats,
 };
 use crate::dps_meter::models::packet::ParsedDamagePacket;
+use crate::dps_meter::models::combat::CombatEvent;
 use crate::dps_meter::storage::loaders::{load_boss_ids, load_healing_skill_codes, load_npc_names};
 
 const ACTOR_METADATA_CAPACITY: usize = 2_000;
@@ -20,6 +21,7 @@ const MOB_METADATA_CAPACITY: usize = 5_000;
 /// still small enough that cloning the map stays cheap.
 const COMBAT_TARGET_CAPACITY: usize = 512;
 const SUMMON_METADATA_CAPACITY: usize = 5_000;
+const COMBAT_EVENT_CAPACITY: usize = 100_000;
 
 const BUFF_TARGET_CAPACITY: usize = 1_024;
 const BUFF_INTERVALS_PER_SKILL_CAPACITY: usize = 1_024;
@@ -166,6 +168,11 @@ struct DataStorageInner {
     pvp_dead_players: HashSet<PvpPlayerKey>,
     /// Scheduled field-boss spawn timestamps, keyed by (map id, mob code).
     field_boss_timers: HashMap<(u32, u32), (u64, u64)>,
+    healing_totals: BoundedMap<u32, u64>,
+    healing_by_target: BoundedMap<u32, HashMap<u32, u64>>,
+    player_deaths: BoundedMap<u32, u32>,
+    dead_entities: HashSet<u32>,
+    combat_events: VecDeque<CombatEvent>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -208,6 +215,11 @@ impl Default for DataStorageInner {
             pvp_combat_stats: HashMap::new(),
             pvp_dead_players: HashSet::new(),
             field_boss_timers: HashMap::new(),
+            healing_totals: BoundedMap::new(ACTOR_METADATA_CAPACITY),
+            healing_by_target: BoundedMap::new(COMBAT_TARGET_CAPACITY),
+            player_deaths: BoundedMap::new(ACTOR_METADATA_CAPACITY),
+            dead_entities: HashSet::new(),
+            combat_events: VecDeque::new(),
         }
     }
 }
@@ -368,6 +380,14 @@ impl DataStorage {
         let mut inner = self.inner.write().unwrap();
 
         if self.healing_skill_codes.contains(&packet.skill_code) {
+            if packet.actor_id != 0 && packet.damage > 0 {
+                let actor = inner.summon_owner_map.get(&packet.actor_id).copied().unwrap_or(packet.actor_id);
+                let total = inner.healing_totals.get_mut_or_insert_with(actor, || 0);
+                *total = total.saturating_add(packet.damage);
+                let target = inner.last_target_by_main_actor.or(inner.last_target).unwrap_or(packet.target_id);
+                let actor_heals = inner.healing_by_target.get_mut_or_insert_with(target, HashMap::new).entry(actor).or_default();
+                *actor_heals = actor_heals.saturating_add(packet.damage);
+            }
             return;
         }
 
@@ -403,6 +423,16 @@ impl DataStorage {
         {
             return;
         }
+
+        inner.combat_events.push_back(CombatEvent {
+            actor_id,
+            target_id: packet.target_id,
+            skill_code: packet.ori_skill_code,
+            damage: packet.damage,
+            is_crit: packet.is_crit,
+            at_ms: (timestamp.max(0.0) * 1000.0) as u64,
+        });
+        while inner.combat_events.len() > COMBAT_EVENT_CAPACITY { inner.combat_events.pop_front(); }
 
         if config.pvp_mode_on && is_target_player {
             let actor = pvp_player_key(&inner, actor_id);
@@ -764,6 +794,22 @@ impl DataStorage {
             .as_hash_map()
     }
 
+    pub fn healing_totals_snapshot(&self) -> HashMap<u32, u64> {
+        self.inner.read().unwrap().healing_totals.as_hash_map()
+    }
+
+    pub fn healing_by_target_snapshot(&self) -> HashMap<u32, HashMap<u32, u64>> {
+        self.inner.read().unwrap().healing_by_target.as_hash_map()
+    }
+
+    pub fn player_deaths_snapshot(&self) -> HashMap<u32, u32> {
+        self.inner.read().unwrap().player_deaths.as_hash_map()
+    }
+
+    pub fn combat_events_snapshot(&self) -> Vec<CombatEvent> {
+        self.inner.read().unwrap().combat_events.iter().cloned().collect()
+    }
+
     pub fn main_actor_combat_power(&self) -> Option<u64> {
         self.inner.read().unwrap().main_actor_combat_power
     }
@@ -847,13 +893,15 @@ impl DataStorage {
     }
 
     pub fn mark_player_dead(&self, entity_id: u32) -> (bool, Option<String>) {
-        if !self.config.read().unwrap().pvp_mode_on {
+        let mut inner = self.inner.write().unwrap();
+        if inner.mob_id_code_map.contains_key(&entity_id) || !inner.actor_id_name_map.contains_key(&entity_id) || !inner.dead_entities.insert(entity_id) {
             return (false, None);
         }
-
-        let mut inner = self.inner.write().unwrap();
+        let deaths = inner.player_deaths.get_mut_or_insert_with(entity_id, || 0);
+        *deaths = deaths.saturating_add(1);
+        if !self.config.read().unwrap().pvp_mode_on { return (true, None); }
         let Some(victim) = pvp_player_key(&inner, entity_id) else {
-            return (false, None);
+            return (true, None);
         };
         if inner.mob_id_code_map.contains_key(&entity_id)
             || !inner.pvp_dead_players.insert(victim.clone())
@@ -898,6 +946,7 @@ impl DataStorage {
 
     pub fn mark_player_alive(&self, entity_id: u32) {
         let mut inner = self.inner.write().unwrap();
+        inner.dead_entities.remove(&entity_id);
         if let Some(player) = pvp_player_key(&inner, entity_id) {
             inner.pvp_dead_players.remove(&player);
         }

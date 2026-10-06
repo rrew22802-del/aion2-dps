@@ -9,6 +9,12 @@ lives in the [NOIA2 repository](https://github.com/ZDYoung0519/NOIA2).
      and some players still update from there: so no hard wraps and no bold in
      2.0.0 and later. From 2.0.0 on the dialog renders Markdown. -->
 
+## [2.6.0]
+
+- Game capture scans all usable adapters together, recognizes VPNs, tunnels, boosters and loopback proxies, and quickly rescans after a flow goes idle.
+- Added per player healing totals and HPS, combat power and death counts to fight data, plus `/v1/fights/{fightId}/timeline` for second by second damage, casts and available buff intervals.
+- Documented the packet evidence and limitations for combat power and deaths.
+
 ## [2.5.0]
 
 - Added the live `/v1/live` service endpoint for current buffs, self-applied effects, own skill hit cooldown data, and target health.

@@ -473,6 +473,8 @@ impl DpsMeter {
             last_target_all_players_overview_stats: Vec::new(),
             main_actor_received_player_overview_stats: Vec::new(),
             main_actor_dealt_player_overview_stats: Vec::new(),
+            combat_events: Vec::new(),
+            buff_intervals: HashMap::new(),
         };
         let _ = self.app.emit("dps-snapshot", empty);
     }
