@@ -683,8 +683,21 @@ impl DpsMeter {
             );
 
             while memory_snapshot_running.load(Ordering::SeqCst) {
-                let removed_ports = dispatcher
-                    .cleanup_stale_assemblers(Duration::from_secs(STALE_ASSEMBLER_IDLE_SECS));
+                let (cap_device, cap_port) = match *active_capture_backend.lock().unwrap() {
+                    Some(CaptureBackend::WinDivert) => (
+                        windivert_capturer.target_device(),
+                        windivert_capturer.target_port(),
+                    ),
+                    Some(CaptureBackend::Npcap) => (
+                        pcap_capturer.target_device(),
+                        pcap_capturer.target_port(),
+                    ),
+                    None => (None, None),
+                };
+                let removed_ports = dispatcher.cleanup_stale_assemblers(
+                    Duration::from_secs(STALE_ASSEMBLER_IDLE_SECS),
+                    cap_port.as_deref(),
+                );
                 if !removed_ports.is_empty() {
                     logger.info(format!(
                         "cleaned stale assembler ports: {}",
@@ -701,17 +714,6 @@ impl DpsMeter {
                     &logger,
                     auto_record_enabled,
                 );
-
-                let (cap_device, cap_port) = match *active_capture_backend.lock().unwrap() {
-                    Some(CaptureBackend::WinDivert) => (
-                        windivert_capturer.target_device(),
-                        windivert_capturer.target_port(),
-                    ),
-                    Some(CaptureBackend::Npcap) => {
-                        (pcap_capturer.target_device(), pcap_capturer.target_port())
-                    }
-                    None => (None, None),
-                };
 
                 if let Some(snapshot) = build_memory_snapshot(
                     &mut system,

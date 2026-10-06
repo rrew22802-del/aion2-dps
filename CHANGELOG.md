@@ -9,6 +9,12 @@ lives in the [NOIA2 repository](https://github.com/ZDYoung0519/NOIA2).
      and some players still update from there: so no hard wraps and no bold in
      2.0.0 and later. From 2.0.0 on the dialog renders Markdown. -->
 
+## [2.6.2]
+
+- Game flow liveness now follows server-to-client protocol packets. After eight quiet seconds the capture scans all adapters again and can switch to a replacement flow.
+- Tracks concurrent game server flows independently after three magic packets, while rejecting unknown flows before TCP and stream assembly.
+- Keeps the active target assembler across quiet periods and clears its partial buffers; dispatcher packet diagnostics now use DEBUG.
+
 ## [2.6.1]
 
 - Added party roster tracking from member-info packets, `inParty` on player summaries, and `GET /v1/party` for tracker filters.

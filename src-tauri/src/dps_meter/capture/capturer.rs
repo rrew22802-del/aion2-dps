@@ -310,7 +310,7 @@ impl PcapCapturer {
             while running.load(Ordering::SeqCst) {
                 if let Some(active_device) = target_device.read().unwrap().clone() {
                     sleep_while_running(&running, Duration::from_secs(1));
-                    if last_target_packet.lock().unwrap().is_some_and(|last| last.elapsed() < Duration::from_secs(8)) {
+                    if !should_rescan(*last_target_packet.lock().unwrap(), Instant::now()) {
                         continue;
                     }
                     logger.info(format!("capture target stale: device={} flow={} idle_for>=8s; rescanning", active_device, target_port.read().unwrap().as_deref().unwrap_or("--")));
@@ -552,18 +552,18 @@ fn inspect_devices_for_magic(
         let out = Arc::clone(&results);
         let running = Arc::clone(running);
         workers.push(thread::spawn(move || {
-            let mut hits: std::collections::HashMap<(u16,u16),u32> = std::collections::HashMap::new();
+            let mut hits: std::collections::HashMap<String,u32> = std::collections::HashMap::new();
             while running.load(Ordering::SeqCst) && Instant::now() < deadline {
                 if let CaptureRead::Packet(packet) = next_captured_packet(api.as_ref(), handle.get()) {
                     if packet.data.starts_with(&MAGIC_PATTERN) {
-                        let flow = if packet.src_port <= packet.dst_port { (packet.src_port, packet.dst_port) } else { (packet.dst_port, packet.src_port) };
+                        let flow = directional_flow_key(&packet);
                         *hits.entry(flow).or_default() += 1;
                     }
                 }
             }
             unsafe { (api.close)(handle.get()) };
             let mut out = out.lock().unwrap();
-            out.extend(hits.into_iter().map(|((a,b),hits)| DeviceDetection { device_name: device_name.clone(), flow: format!("{a}-{b}"), hits }));
+            out.extend(hits.into_iter().map(|(flow,hits)| DeviceDetection { device_name: device_name.clone(), flow, hits }));
         }));
     }
     for worker in workers { let _ = worker.join(); }
@@ -598,14 +598,27 @@ fn start_capture_thread(
             }
         };
 
+        let mut server_magic_hits = std::collections::HashMap::<String, u32>::new();
+        let mut recognized_server_flows = std::collections::HashSet::<String>::new();
+        if let Some(flow) = target_port.as_ref() {
+            recognized_server_flows.insert(flow.clone());
+        }
         while running.load(Ordering::SeqCst) && thread_running.load(Ordering::SeqCst) {
             match next_captured_packet(&npcap, capture_handle) {
                 CaptureRead::Packet(packet) => {
-                    let matches_target = target_port.as_deref().map_or(true, |flow| {
-                        let (a,b) = if packet.src_port <= packet.dst_port {(packet.src_port,packet.dst_port)} else {(packet.dst_port,packet.src_port)};
-                        flow == format!("{a}-{b}")
-                    });
-                    if matches_target { *last_target_packet.lock().unwrap() = Some(Instant::now()); }
+                    let flow = directional_flow_key(&packet);
+                    if packet.data.starts_with(&MAGIC_PATTERN) {
+                        let hits = server_magic_hits.entry(flow.clone()).or_default();
+                        *hits = hits.saturating_add(1);
+                        if *hits >= MAGIC_MIN_HITS {
+                            recognized_server_flows.insert(flow.clone());
+                        }
+                    }
+                    // Game server packets start with the protocol magic. Client keepalives
+                    // and unrelated flows must not keep an idle target alive.
+                    if is_server_game_packet(&flow, &packet.data, &recognized_server_flows) {
+                        *last_target_packet.lock().unwrap() = Some(Instant::now());
+                    }
                     let _ = channel.try_send(packet);
                 }
                 CaptureRead::Timeout => continue,
@@ -618,6 +631,30 @@ fn start_capture_thread(
     });
 
     capture_threads.lock().unwrap().push((capture_running, handle));
+}
+
+fn directional_flow_key(packet: &CapturedPacket) -> String {
+    format!("{}:{}->{}:{}", format_ip(packet.src_ip), packet.src_port, format_ip(packet.dst_ip), packet.dst_port)
+}
+
+fn format_ip(ip: [u8; 4]) -> String {
+    format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+}
+
+fn target_is_fresh(idle_for: Duration) -> bool {
+    idle_for < Duration::from_secs(8)
+}
+
+fn should_rescan(last_server_packet: Option<Instant>, now: Instant) -> bool {
+    last_server_packet.is_none_or(|last| !target_is_fresh(now.saturating_duration_since(last)))
+}
+
+fn is_server_game_packet(
+    flow: &str,
+    data: &[u8],
+    recognized_server_flows: &std::collections::HashSet<String>,
+) -> bool {
+    recognized_server_flows.contains(flow) && data.starts_with(&MAGIC_PATTERN)
 }
 
 fn stop_capture_threads(capture_threads: &Arc<Mutex<Vec<(Arc<AtomicBool>, JoinHandle<()>)>>>) {
@@ -803,11 +840,39 @@ mod tests {
         ];
         assert!(!packets[0].data.starts_with(&MAGIC_PATTERN));
         let chosen = choose_target(&[physical, tunnel], &[
-            DeviceDetection { device_name: "\\Device\\Physical".into(), flow: "54745-13328".into(), hits: MAGIC_MIN_HITS },
-            DeviceDetection { device_name: "\\Device\\Happ".into(), flow: "54745-13328".into(), hits: MAGIC_MIN_HITS },
+            DeviceDetection { device_name: "\\Device\\Physical".into(), flow: "193.202.112.113:13328->172.19.0.1:54745".into(), hits: MAGIC_MIN_HITS },
+            DeviceDetection { device_name: "\\Device\\Happ".into(), flow: "193.202.112.113:13328->172.19.0.1:54745".into(), hits: MAGIC_MIN_HITS },
             DeviceDetection { device_name: "\\Device\\Happ".into(), flow: "50000-443".into(), hits: 0 },
         ]).unwrap();
         assert_eq!(chosen.device_name, "\\Device\\Happ");
-        assert_eq!(chosen.flow, "54745-13328");
+        assert_eq!(chosen.flow, "193.202.112.113:13328->172.19.0.1:54745");
+    }
+
+    #[test]
+    fn client_keepalive_does_not_refresh_server_packet_staleness() {
+        let last_server_packet = Instant::now() - Duration::from_secs(9);
+        let client_keepalive = vec![0x01, 0x02, 0x03];
+        let server_flow = "193.202.112.113:13328->172.19.0.1:54745".to_string();
+        let reverse_client_flow = "172.19.0.1:54745->193.202.112.113:13328";
+        let recognized = std::collections::HashSet::from([server_flow]);
+        assert!(!is_server_game_packet(reverse_client_flow, &client_keepalive, &recognized));
+        assert!(!target_is_fresh(last_server_packet.elapsed()));
+        // The detector consumes this decision by logging stale and rescanning devices.
+        assert!(should_rescan(Some(last_server_packet), Instant::now()));
+    }
+
+    #[test]
+    fn directional_flow_key_distinguishes_server_and_client_packets() {
+        let server_packet = CapturedPacket {
+            src_ip: [193, 202, 112, 113], src_port: 13328,
+            dst_ip: [172, 19, 0, 1], dst_port: 54745,
+            sequence: 0, data: MAGIC_PATTERN.to_vec(), captured_at: 0.0,
+        };
+        let client_packet = CapturedPacket {
+            src_ip: server_packet.dst_ip, src_port: server_packet.dst_port,
+            dst_ip: server_packet.src_ip, dst_port: server_packet.src_port,
+            sequence: 0, data: vec![0, 0, 1], captured_at: 0.0,
+        };
+        assert_ne!(directional_flow_key(&server_packet), directional_flow_key(&client_packet));
     }
 }

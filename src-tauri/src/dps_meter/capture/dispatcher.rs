@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, RwLock,
@@ -19,8 +19,8 @@ use crate::plugins::logger::AppLogger;
 const TLS_CONTENT_TYPES: [u8; 4] = [0x14, 0x15, 0x16, 0x17];
 const TLS_VERSIONS: [u8; 5] = [0x00, 0x01, 0x02, 0x03, 0x04];
 const MAGIC: [u8; 3] = [0x0E, 0x00, 0x36];
-const MAGIC_LOCK_THRESHOLD: usize = 1;
 const MAGIC_LOCK_WINDOW: Duration = Duration::from_secs(3);
+const NEGATIVE_CACHE_LIMIT: usize = 4096;
 
 #[derive(Default)]
 struct RecentPortWindow {
@@ -60,6 +60,8 @@ struct DispatcherState {
     nickname_assemblers: HashMap<String, TrackedAssembler>,
     tcp_reassemblers: HashMap<TcpFlowKey, TrackedTcpReassembler>,
     magic_hits: HashMap<String, VecDeque<Instant>>,
+    game_flows: HashSet<String>,
+    ignored_flows: HashMap<String, Instant>,
     recent_ports: RecentPortWindow,
     logged_packets: usize,
     logged_magic_packets: usize,
@@ -116,6 +118,10 @@ impl TrackedAssembler {
 }
 
 impl DispatcherState {
+    fn observe_magic(&mut self, key: &str, now: Instant) -> bool {
+        observe_game_magic(&mut self.magic_hits, &mut self.game_flows, key, now)
+    }
+
     fn new(
         data_storage: Arc<DataStorage>,
         _logger: Arc<AppLogger>,
@@ -128,6 +134,8 @@ impl DispatcherState {
             nickname_assemblers: HashMap::new(),
             tcp_reassemblers: HashMap::new(),
             magic_hits: HashMap::new(),
+            game_flows: HashSet::new(),
+            ignored_flows: HashMap::new(),
             recent_ports: RecentPortWindow::new(Duration::from_secs(2)),
             logged_packets: 0,
             logged_magic_packets: 0,
@@ -147,6 +155,8 @@ impl DispatcherState {
         self.nickname_assemblers.clear();
         self.tcp_reassemblers.clear();
         self.magic_hits.clear();
+        self.game_flows.clear();
+        self.ignored_flows.clear();
         self.recent_ports.entries.clear();
         self.logged_packets = 0;
         self.logged_magic_packets = 0;
@@ -244,6 +254,46 @@ impl CaptureDispatcher {
                 recorder.record(&packet);
 
                 let mut state = state.lock().unwrap();
+                let key = directional_connection_key(
+                    packet.src_ip,
+                    packet.src_port,
+                    packet.dst_ip,
+                    packet.dst_port,
+                );
+                let is_game_magic = packet.data.starts_with(&MAGIC);
+                if is_game_magic {
+                    crate::dps_meter::region::observe_server_ip(packet.src_ip);
+                    if state.observe_magic(&key, Instant::now()) {
+                        state.ignored_flows.remove(&key);
+                        state.ensure_candidate_assemblers(&key, &logger);
+                        let locked = state.recent_ports.add_and_get_locked(key.clone());
+                        *combat_port.write().unwrap() = locked.or_else(|| Some(key.clone()));
+                    }
+                } else if !state.game_flows.contains(&key) {
+                    // Unknown flows are rejected before TCP reassembly and stream parsing.
+                    // Remember them in a bounded cache; a future magic packet promotes
+                    // the same directional key immediately.
+                    if state.ignored_flows.contains_key(&key) {
+                        continue;
+                    }
+                    if state.ignored_flows.len() >= NEGATIVE_CACHE_LIMIT {
+                        if let Some(oldest) = state
+                            .ignored_flows
+                            .iter()
+                            .min_by_key(|(_, seen)| **seen)
+                            .map(|(flow, _)| flow.clone())
+                        {
+                            state.ignored_flows.remove(&oldest);
+                        }
+                    }
+                    state.ignored_flows.insert(key, Instant::now());
+                    continue;
+                }
+                if !state.game_flows.contains(&key) {
+                    // The first two magic packets only establish flow identity.
+                    continue;
+                }
+
                 let flow_key = TcpFlowKey {
                     src_ip: packet.src_ip,
                     src_port: packet.src_port,
@@ -282,7 +332,7 @@ impl CaptureDispatcher {
                 ping_tracker.on_packet(&packet.data, packet.captured_at);
 
                 if state.logged_packets < 20 {
-                    logger.info(format!(
+                    logger.debug(format!(
                         "dispatcher packet src={}:{} dst={}:{} sequence={} payload_len={} captured_at={:.3}",
                         format_ipv4(packet.src_ip),
                         packet.src_port,
@@ -305,24 +355,7 @@ impl CaptureDispatcher {
                     continue;
                 }
 
-                let key = directional_connection_key(
-                    packet.src_ip,
-                    packet.src_port,
-                    packet.dst_ip,
-                    packet.dst_port,
-                );
-                let contains_magic = packet
-                    .data
-                    .windows(MAGIC.len())
-                    .any(|window| window == MAGIC);
-
-                if contains_magic {
-                    // Carrying the heartbeat identifies this host as the game
-                    // server, which is what region detection keys off.
-                    crate::dps_meter::region::observe_server_ip(packet.src_ip);
-                }
-
-                if contains_magic && state.logged_magic_packets < 20 {
+                if is_game_magic && state.logged_magic_packets < 20 {
                     // logger.debug(format!(
                     //     "dispatcher magic packet key={} payload_len={} head={}",
                     //     key,
@@ -332,39 +365,15 @@ impl CaptureDispatcher {
                     state.logged_magic_packets += 1;
                 }
 
-                let has_enough_magic_hits = if contains_magic {
-                    state.ensure_candidate_assemblers(&key, &logger);
-                    let now = Instant::now();
-                    let hits = state.magic_hits.entry(key.clone()).or_default();
-                    while hits.front().is_some_and(|hit_at| {
-                        now.saturating_duration_since(*hit_at) > MAGIC_LOCK_WINDOW
-                    }) {
-                        hits.pop_front();
-                    }
-                    hits.push_back(now);
-                    hits.len() > MAGIC_LOCK_THRESHOLD
-                } else {
-                    false
-                };
-
-                if contains_magic && has_enough_magic_hits {
-                    if let Some(locked) = state.recent_ports.add_and_get_locked(key.clone()) {
-                        *combat_port.write().unwrap() = Some(locked.clone());
-                        state.ensure_candidate_assemblers(&locked, &logger);
-                    }
-                }
-
                 let is_candidate_connection = state.assemblers.contains_key(&key);
                 if is_candidate_connection {
-                    let combat_damage_enabled =
-                        combat_port.read().unwrap().as_deref() == Some(key.as_str());
                     let assembler = state
                         .assemblers
                         .get_mut(&key)
                         .expect("candidate assembler must exist");
                     let _ = assembler
                         .assembler
-                        .process_chunk(&packet.data, combat_damage_enabled);
+                        .process_chunk(&packet.data, true);
                     assembler.mark_processed();
 
                     let nickname_assembler = state
@@ -406,18 +415,45 @@ impl CaptureDispatcher {
         !state.recent_ports.entries.is_empty()
     }
 
-    pub fn cleanup_stale_assemblers(&self, max_idle: Duration) -> Vec<String> {
+    pub fn cleanup_stale_assemblers(
+        &self,
+        max_idle: Duration,
+        protected_flow: Option<&str>,
+    ) -> Vec<String> {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
         let mut combat_port = self.combat_port.write().unwrap();
         let mut removed = Vec::new();
-        state
-            .tcp_reassemblers
-            .retain(|_, tracked| now.duration_since(tracked.last_seen_at) <= max_idle);
+        state.tcp_reassemblers.retain(|key, tracked| {
+            if now.duration_since(tracked.last_seen_at) <= max_idle {
+                return true;
+            }
+            let flow = directional_connection_key(
+                key.src_ip,
+                key.src_port,
+                key.dst_ip,
+                key.dst_port,
+            );
+            if protected_flow == Some(flow.as_str()) {
+                tracked.reassembler.clear();
+                tracked.last_seen_at = now;
+                true
+            } else {
+                false
+            }
+        });
 
         state.assemblers.retain(|key, tracked| {
             let is_stale = now.duration_since(tracked.last_processed_at) > max_idle;
             if !is_stale {
+                return true;
+            }
+
+            if protected_flow == Some(key.as_str()) {
+                // A quiet/loading target can remain an established TCP flow. Keep its
+                // assembler identity and flow lock, but discard a partial packet buffer.
+                tracked.assembler.clear();
+                tracked.mark_processed();
                 return true;
             }
 
@@ -539,4 +575,65 @@ fn directional_connection_key(
 
 fn format_ipv4(ip: [u8; 4]) -> String {
     format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+}
+
+const DISPATCH_MAGIC_HITS: usize = 1;
+
+fn observe_game_magic(
+    hits_by_flow: &mut HashMap<String, VecDeque<Instant>>,
+    game_flows: &mut HashSet<String>,
+    flow: &str,
+    now: Instant,
+) -> bool {
+    if game_flows.contains(flow) {
+        return false;
+    }
+    let hits = hits_by_flow.entry(flow.to_string()).or_default();
+    while hits
+        .front()
+        .is_some_and(|hit_at| now.saturating_duration_since(*hit_at) > MAGIC_LOCK_WINDOW)
+    {
+        hits.pop_front();
+    }
+    hits.push_back(now);
+    // TLS and other non-game payloads never start with the game magic, so one hit is enough here;
+    // waiting for three dropped the login burst (character name/identity) of a new flow.
+    if hits.len() >= DISPATCH_MAGIC_HITS {
+        game_flows.insert(flow.to_string());
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{observe_game_magic, MAGIC};
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn new_magic_flow_on_same_device_is_promoted_on_the_first_server_packet() {
+        let mut hits = HashMap::<String, VecDeque<Instant>>::new();
+        let mut game_flows = HashSet::new();
+        let now = Instant::now();
+        let flow = "193.202.112.113:13329->172.19.0.1:54746";
+        assert!(observe_game_magic(&mut hits, &mut game_flows, flow, now));
+        assert!(game_flows.contains(flow));
+        // already a game flow: no second promotion
+        assert!(!observe_game_magic(&mut hits, &mut game_flows, flow, now + Duration::from_millis(20)));
+    }
+
+    #[test]
+    fn https_flow_stays_unrecognized_and_is_not_assembled_or_resynced() {
+        let mut hits = HashMap::<String, VecDeque<Instant>>::new();
+        let mut game_flows = HashSet::new();
+        let https_payload = [0x16, 0x03, 0x01, 0, 0x0e, 0, 0x36];
+        assert!(!https_payload.starts_with(&MAGIC));
+        let flow = "8.6.112.0:443->172.19.0.1:61982";
+        for _ in 0..10 {
+            assert!(!game_flows.contains(flow));
+        }
+        assert!(!hits.contains_key(flow));
+    }
 }

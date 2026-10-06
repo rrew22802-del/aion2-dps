@@ -12,7 +12,7 @@ The server listens only on `127.0.0.1:<port>`. The token must be nonempty ASCII.
 
 | Method | Path | Response |
 | --- | --- | --- |
-| GET | `/v1/health` | `{ "version": "2.6.1", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
+| GET | `/v1/health` | `{ "version": "2.6.2", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
 | GET | `/v1/state` | Current fight (shape below). When idle: `fightId`, `startedAt`, and `target` are `null`; `active` is `false`, numbers are zero, and `players` is empty. |
 | GET | `/v1/party` | `{ "members": [{"id": 16450, "name": "…", "class": "GLADIATOR"}], "updatedAt": 1790000000000 }` current known party members. |
 | GET | `/v1/live` | Current self buffs, self-applied effects on the current or pinned target, recent own skill uses, and target HP. `?target=<id>` pins a known mob target. |

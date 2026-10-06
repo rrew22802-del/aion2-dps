@@ -1,6 +1,6 @@
 [package]
 name = "aether"
-version = "2.6.1"
+version = "2.6.2"
 license = "GPL-3.0-only"
 description = "Real-time DPS meter for AION 2"
 authors = ["Helveticxa"]
