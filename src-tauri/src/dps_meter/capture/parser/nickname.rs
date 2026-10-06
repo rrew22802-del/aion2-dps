@@ -204,7 +204,8 @@ pub(crate) fn parse_other(
             .data_storage
             .set_actor_combat_power(actor_id, combat_power);
     }
-    context.data_storage.upsert_party_member(actor_id, &actor_name, actor_class);
+    // 45 36 is every visible player (138 names in a town capture, 07.10), NOT the party: it must not
+    // touch the roster. The real party packet is still unknown; until it is found the party is self only.
     context.logger.info(format!(
         "[{}] actor actor={} name={} sid={} job={} class={} combat_power={}",
         context.port,
