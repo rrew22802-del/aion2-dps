@@ -563,7 +563,7 @@ fn inspect_devices_for_magic(
             }
             unsafe { (api.close)(handle.get()) };
             let mut out = out.lock().unwrap();
-            out.extend(hits.into_iter().map(|((a,b),hits)| DeviceDetection { device_name, flow: format!("{a}-{b}"), hits }));
+            out.extend(hits.into_iter().map(|((a,b),hits)| DeviceDetection { device_name: device_name.clone(), flow: format!("{a}-{b}"), hits }));
         }));
     }
     for worker in workers { let _ = worker.join(); }
