@@ -523,6 +523,14 @@ fn prioritize_devices(mut devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
 #[derive(Debug, Clone)]
 struct DeviceDetection { device_name: String, flow: String, hits: u32 }
 
+/// A pcap handle owned by exactly one worker thread (opened here, read and closed only by that worker).
+struct WorkerHandle(PcapT);
+unsafe impl Send for WorkerHandle {}
+impl WorkerHandle {
+    // a method call makes the closure capture the whole wrapper, not the raw pointer field
+    fn get(&self) -> PcapT { self.0 }
+}
+
 fn inspect_devices_for_magic(
     npcap: Arc<NpcapLib>,
     devices: &[DeviceInfo],
@@ -539,20 +547,21 @@ fn inspect_devices_for_magic(
     let deadline = Instant::now() + timeout;
     let mut workers = Vec::new();
     for (device_name, handle) in opened {
+        let handle = WorkerHandle(handle);
         let api = Arc::clone(&npcap);
         let out = Arc::clone(&results);
         let running = Arc::clone(running);
         workers.push(thread::spawn(move || {
             let mut hits: std::collections::HashMap<(u16,u16),u32> = std::collections::HashMap::new();
             while running.load(Ordering::SeqCst) && Instant::now() < deadline {
-                if let CaptureRead::Packet(packet) = next_captured_packet(api.as_ref(), handle) {
+                if let CaptureRead::Packet(packet) = next_captured_packet(api.as_ref(), handle.get()) {
                     if packet.data.starts_with(&MAGIC_PATTERN) {
                         let flow = if packet.src_port <= packet.dst_port { (packet.src_port, packet.dst_port) } else { (packet.dst_port, packet.src_port) };
                         *hits.entry(flow).or_default() += 1;
                     }
                 }
             }
-            unsafe { (api.close)(handle) };
+            unsafe { (api.close)(handle.get()) };
             let mut out = out.lock().unwrap();
             out.extend(hits.into_iter().map(|((a,b),hits)| DeviceDetection { device_name, flow: format!("{a}-{b}"), hits }));
         }));
