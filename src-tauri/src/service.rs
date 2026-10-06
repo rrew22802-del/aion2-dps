@@ -479,7 +479,7 @@ fn class_info(class: &str, lang: &str) -> (Option<u32>, Option<&'static str>) {
         "GLADIATOR" => (2, "Gladiator", "Гладиатор"),
         "TEMPLAR" => (3, "Templar", "Страж"),
         "ASSASSIN" => (5, "Assassin", "Убийца"),
-        "RANGER" => (4, "Ranger", "Лучник"),
+        "RANGER" => (4, "Ranger", "Стрелок"),
         "SORCERER" => (7, "Sorcerer", "Волшебник"),
         "ELEMENTALIST" => (6, "Elementalist", "Заклинатель"),
         "CLERIC" => (8, "Cleric", "Целитель"),
