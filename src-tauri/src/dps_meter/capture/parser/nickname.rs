@@ -98,6 +98,7 @@ fn parse_main_fixed(context: &ParserContext<'_>, payload: &[u8]) -> bool {
         actor_class.unwrap_or("none")
     ));
     context.data_storage.set_main_actor(actor_id, &name);
+    context.data_storage.upsert_party_member(actor_id, &name, actor_class);
     true
 }
 
@@ -107,11 +108,7 @@ pub(crate) fn parse_other(
     _is_compressed_bundle: bool,
 ) -> bool {
     let actor_id_info = read_varint(payload, 2);
-    if !actor_id_info.is_valid() || actor_id_info.value <= 0 {
-        return false;
-    }
-
-    let actor_id = actor_id_info.value as u32;
+    let Some(actor_id) = decode_party_member_id(payload) else { return false; };
     let mut offset = 2 + actor_id_info.length;
     if payload.len() <= offset {
         return false;
@@ -207,6 +204,7 @@ pub(crate) fn parse_other(
             .data_storage
             .set_actor_combat_power(actor_id, combat_power);
     }
+    context.data_storage.upsert_party_member(actor_id, &actor_name, actor_class);
     context.logger.info(format!(
         "[{}] actor actor={} name={} sid={} job={} class={} combat_power={}",
         context.port,
@@ -221,6 +219,65 @@ pub(crate) fn parse_other(
     ));
 
     true
+}
+
+fn decode_party_member_id(payload: &[u8]) -> Option<u32> {
+    match decode_party_packet(payload)? {
+        PartyPacket::MemberInfo(id) => Some(id),
+        _ => None,
+    }
+}
+
+/// Party action packets encode the affected actor as the first varint after
+/// their two-byte opcode. These are kept separate from member-info (45 36),
+/// whose longer layout also carries name and class metadata.
+pub(crate) fn parse_party_action(context: &ParserContext<'_>, payload: &[u8]) -> bool {
+    match decode_party_action(payload) {
+        Some(PartyAction::Leave(actor_id)) => {
+            context.data_storage.remove_party_member(actor_id);
+            true
+        }
+        Some(PartyAction::Disband) => {
+            context.data_storage.clear_party();
+            true
+        }
+        None => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartyAction {
+    Leave(u32),
+    Disband,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartyPacket {
+    MemberInfo(u32),
+    Leave(u32),
+    Disband,
+}
+
+fn decode_party_packet(payload: &[u8]) -> Option<PartyPacket> {
+    if payload.len() < 2 || payload[0] != 0x45 { return None; }
+    match payload[1] {
+        0x36 | 0x37 => {
+            let actor = read_varint(payload, 2);
+            if !actor.is_valid() || actor.value <= 0 { return None; }
+            let actor_id = actor.value as u32;
+            Some(if payload[1] == 0x36 { PartyPacket::MemberInfo(actor_id) } else { PartyPacket::Leave(actor_id) })
+        }
+        0x38 => Some(PartyPacket::Disband),
+        _ => None,
+    }
+}
+
+fn decode_party_action(payload: &[u8]) -> Option<PartyAction> {
+    match decode_party_packet(payload)? {
+        PartyPacket::Leave(id) => Some(PartyAction::Leave(id)),
+        PartyPacket::Disband => Some(PartyAction::Disband),
+        PartyPacket::MemberInfo(_) => None,
+    }
 }
 
 fn parse_snapshot_combat_power(packet: &[u8]) -> Option<u64> {
@@ -395,7 +452,27 @@ fn is_han_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_nickname;
+    use super::{decode_party_action, decode_party_member_id, decode_party_packet, sanitize_nickname, PartyAction, PartyPacket};
+
+    #[test]
+    fn synthetic_party_join_and_update_use_member_info_opcode() {
+        let initial = [0x45, 0x36, 42, 0x00, 0x00, 0x00];
+        let update = [0x45, 0x36, 42, 0x01, 0x00, 0x00];
+        assert_eq!(decode_party_member_id(&initial), Some(42));
+        assert_eq!(decode_party_member_id(&update), Some(42));
+        assert_eq!(decode_party_packet(&initial), Some(PartyPacket::MemberInfo(42)));
+        assert_eq!(decode_party_member_id(&[0x44, 0x36, 42]), None);
+    }
+
+    #[test]
+    fn synthetic_party_leave_and_disband_packets_decode() {
+        assert_eq!(decode_party_action(&[0x45, 0x37, 0xAC, 0x02]), Some(PartyAction::Leave(300)));
+        assert_eq!(decode_party_action(&[0x45, 0x38]), Some(PartyAction::Disband));
+        assert_eq!(decode_party_packet(&[0x45, 0x37, 0xAC, 0x02]), Some(PartyPacket::Leave(300)));
+        assert_eq!(decode_party_packet(&[0x45, 0x38]), Some(PartyPacket::Disband));
+        assert_eq!(decode_party_action(&[0x45, 0x37, 0x80]), None);
+        assert_eq!(decode_party_action(&[0x46, 0x37, 1]), None);
+    }
 
     #[test]
     fn sanitize_nickname_keeps_single_cjk_extension_character() {

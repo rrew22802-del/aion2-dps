@@ -12,8 +12,9 @@ The server listens only on `127.0.0.1:<port>`. The token must be nonempty ASCII.
 
 | Method | Path | Response |
 | --- | --- | --- |
-| GET | `/v1/health` | `{ "version": "2.6.0", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
+| GET | `/v1/health` | `{ "version": "2.6.1", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
 | GET | `/v1/state` | Current fight (shape below). When idle: `fightId`, `startedAt`, and `target` are `null`; `active` is `false`, numbers are zero, and `players` is empty. |
+| GET | `/v1/party` | `{ "members": [{"id": 16450, "name": "…", "class": "GLADIATOR"}], "updatedAt": 1790000000000 }` current known party members. |
 | GET | `/v1/live` | Current self buffs, self-applied effects on the current or pinned target, recent own skill uses, and target HP. `?target=<id>` pins a known mob target. |
 | GET | `/v1/field-bosses` | Field-boss spawn timers last received from packet `01 91`; names are `null` with `--lang ru`. |
 | GET | `/v1/assets/aion2/class/{name}.png` or `/v1/assets/aion2/skill/{name}.png` | Bundled icon bytes. Only PNG files directly in those two folders are served; missing or invalid paths return 404. |
@@ -49,14 +50,14 @@ For a tracker-hosted tab, launch the executable separately with `--embedded --pa
   "totalDamage": 123456,
   "players": [{
     "id": 16450, "name": "…", "classId": 2, "className": "Gladiator", "classIcon": "aion2/class/gladiator.png",
-    "isSelf": true, "isSummonOwner": false, "damage": 34567,
+    "isSelf": true, "inParty": true, "isSummonOwner": false, "damage": 34567,
     "dps": 812.3, "share": 0.28, "hits": 140, "critRate": 0.31, "maxHit": 5120,
     "cp": 18452, "deaths": 0, "healTotal": 9200, "hps": 216.5
   }]
 }
 ```
 
-`/v1/state` and archived fight players also expose `cp` (combat power, or `null` when not observed), `deaths`, `healTotal`, and `hps`. Healing totals cover healing packets with a decoded amount and are counted across targets; HPS divides by that player's observed fight duration. A packet without an amount contributes nothing.
+`/v1/state` and archived fight players also expose `cp` (combat power, or `null` when not observed), `deaths`, `healTotal`, `hps`, and `inParty`. `inParty` is true for the main character and members in the latest known party roster; for other players it is false until a member-info packet identifies them. Archived records preserve the roster captured when the fight was saved. `/v1/history` rows include a `players` array with the same `inParty` field. `GET /v1/party` returns the current roster; `updatedAt` is Unix milliseconds or `null` before the first update. A party roster is cleared when the main character changes, on a parsed leave/disband action, and is refreshed by member-info updates. Alliance membership is not distinguished by the observed packet data, so this endpoint describes the party only. Healing totals cover healing packets with a decoded amount and are counted across targets; HPS divides by that player's observed fight duration. A packet without an amount contributes nothing.
 
 `GET /v1/fights/{fightId}/timeline?player={id}` returns `{ "durationMs", "damagePerSecond": [{"offsetMs", "playerDamage", "groupDamage"}], "casts": [{"offsetMs", "skillCode", "damage", "crit"}], "buffs": [{"startOffsetMs", "endOffsetMs", "skillCode", "sourceId"}] }`. Resolution and included duration are capped at 20 minutes (1,200 one-second buckets); casts are capped at 25,000. Buff intervals are returned when the existing buff parser stored them. An unknown fight or player returns 404; a missing or invalid player query returns 400.
 
@@ -81,7 +82,7 @@ The current fight is the last target of the main character, or the last observed
 
 Skills are a JSON array of `{ "skillId", "name", "damage", "hits", "critRate", "maxHit", "share" }`. Skill `share` is a fraction of that player's damage on this target. `critRate` is `null` if no hits were counted. Empty known fights return `[]`; unknown fights return 404. Invalid IDs or missing `fight` return 400.
 
-`/v1/players/{id}` includes the same `id`, `name`, `classId`, `className`, `classIcon`, `isSelf`, `isSummonOwner`, `damage`, `dps`, `share`, `hits`, `critRate`, and `maxHit` fields as the player in `/v1/state`, plus `fightSec`, `backRate`, `frontRate`, `doubleRate`, `perfectRate`, `parryRate`, and `multiRate`. `fightSec` is that player's first-to-last hit on the target, with a 1-second minimum as in Aether's detail window (`null` if unavailable); detail `dps` uses that duration. Rates are fractions from 0 to 1 and are `null` when no hits were counted. An unknown player returns 404.
+`/v1/players/{id}` includes the same `id`, `name`, `classId`, `className`, `classIcon`, `isSelf`, `inParty`, `isSummonOwner`, `damage`, `dps`, `share`, `hits`, `critRate`, and `maxHit` fields as the player in `/v1/state`, plus `fightSec`, `backRate`, `frontRate`, `doubleRate`, `perfectRate`, `parryRate`, and `multiRate`. `fightSec` is that player's first-to-last hit on the target, with a 1-second minimum as in Aether's detail window (`null` if unavailable); detail `dps` uses that duration. Rates are fractions from 0 to 1 and are `null` when no hits were counted. An unknown player returns 404.
 
 Each skill also has `icon` (an asset path such as `aion2/skill/1101.png`), `spec` (active specialty slot numbers, 1–5), `perfectRate`, `doubleRate`, `frontRate`, `backRate`, `parryRate`, `multiRate`, `multiDamage`, `minHit`, and `avgHit`. Rates use the same fraction and null convention. `multiDamage` is the engine's counted multi-hit damage. `minHit` and `avgHit` are `null` with no hits. Request an icon path by prefixing it with `/v1/assets/` and the service token; icons are served from the executable's bundled frontend assets, without a website request.
 
@@ -93,6 +94,6 @@ Each skill also has `icon` (an asset path such as `aion2/skill/1101.png`), `spec
 
 When capture starts after login, 20 or more `00 8D` packets can identify the local player if one entity accounts for at least 60% of them. The login packet remains authoritative when received later. Class inference uses the existing skill-ID prefix table when a job byte is unavailable; unrecognized classes stay `null`.
 
-History rows are `{ "fightId", "startedAt", "durationSec", "target", "isBoss", "totalDamage", "selfDps", "selfShare", "healTotal", "hps", "deaths", "selfCp", "selfDeaths" }`. `healTotal` and `deaths` are group totals; the `self*` fields refer to the main character when known. History is the existing engine history; it saves fights over 1,000,000 damage and retains up to 500 records. A reset may therefore produce no history row.
+History rows are `{ "fightId", "startedAt", "durationSec", "target", "isBoss", "totalDamage", "selfDps", "selfShare", "healTotal", "hps", "deaths", "selfCp", "selfDeaths", "players" }`. Each player row includes `inParty`. `healTotal` and `deaths` are group totals; the `self*` fields refer to the main character when known. History is the existing engine history; it saves fights over 1,000,000 damage and retains up to 500 records. A reset may therefore produce no history row.
 
 Player names come from captured game data. English target names come from the bundled NPC catalogue and English skill names from the same catalogue used by the overlays. The existing project has no Russian NPC or skill catalogue. With `--lang ru`, class names are Russian and target/skill names without a Russian entry are `null` on the existing fight and detail routes; `/v1/live` uses empty strings for missing skill names and `null` for target names. The English catalogue is not mislabeled as Russian. All numeric measurements and IDs are language independent.

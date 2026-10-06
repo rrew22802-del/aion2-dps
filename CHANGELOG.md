@@ -9,6 +9,11 @@ lives in the [NOIA2 repository](https://github.com/ZDYoung0519/NOIA2).
      and some players still update from there: so no hard wraps and no bold in
      2.0.0 and later. From 2.0.0 on the dialog renders Markdown. -->
 
+## [2.6.1]
+
+- Added party roster tracking from member-info packets, `inParty` on player summaries, and `GET /v1/party` for tracker filters.
+- Documented party packet observations, API behavior and parser limitations.
+
 ## [2.6.0]
 
 - Game capture scans all usable adapters together, recognizes VPNs, tunnels, boosters and loopback proxies, and quickly rescans after a flow goes idle.

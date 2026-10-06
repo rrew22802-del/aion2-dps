@@ -254,7 +254,12 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
             // ?target=<id> pins one target of the session (owner 05.10: look at the boss alone, without resetting before it)
             let owners = meter.summon_owner_ids();
             let pinned = query_value(query, "target").and_then(|v| v.parse::<u32>().ok());
-            (200, current_state(meter.get_dps_snapshot(0).as_ref(), &owners, pinned, lang), false)
+            let party = meter.party_snapshot();
+            (200, current_state(meter.get_dps_snapshot(0).as_ref(), &owners, &party.member_ids, pinned, lang), false)
+        }
+        (Method::Get, "/v1/party") => {
+            let party = meter.party_snapshot();
+            (200, json!({"members": party.members, "updatedAt": party.updated_at}), false)
         }
         (Method::Get, "/v1/targets") => (200, targets_json(meter.get_dps_snapshot(0).as_ref(), lang), false),
         (Method::Get, "/v1/field-bosses") => {
@@ -289,8 +294,9 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
                 Ok(limit) => {
                     let mut records = meter.get_history();
                     records.reverse();
+                    let party_ids = meter.party_snapshot().member_ids;
                     let rows: Vec<_> = records.iter().take(limit.min(500))
-                        .map(|record| history_row(record, lang)).collect();
+                        .map(|record| history_row(record, &party_ids, lang)).collect();
                     (200, json!(rows), false)
                 }
                 Err(_) => (400, json!({"error": "invalid limit"}), false),
@@ -313,7 +319,7 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
         (Method::Post, "/v1/ui/player-detail") => {
             match parse_detail_request(body) {
                 Some((player, fight, position)) => match selected_fight(&meter, &fight) {
-                    Some(selected) if player_detail(&selected, player, lang).is_some() => {
+                    Some(selected) if player_detail(&selected, player, &meter.party_snapshot().member_ids, lang).is_some() => {
                         let selection = match selected {
                             SelectedFight::Current(_, target, _) => json!({"actorId": player, "targetId": target, "mode": "live"}),
                             SelectedFight::History(record) => json!({"actorId": player, "mode": "history", "record": record}),
@@ -379,7 +385,7 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
         (Method::Get, _) if path.starts_with("/v1/history/") => {
             let id = &path[12..];
             match meter.get_history().into_iter().find(|record| record.id == id) {
-                Some(record) => (200, record_state(&record, lang), false),
+                Some(record) => (200, record_state(&record, &meter.party_snapshot().member_ids, lang), false),
                 None => (404, json!({"error": "fight not found"}), false),
             }
         }
@@ -420,7 +426,7 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
             let id = path.trim_start_matches("/v1/players/");
             match (id.parse::<u32>(), query_value(query, "fight")) {
                 (Ok(id), Some(fight)) => match selected_fight(&meter, fight) {
-                    Some(selected) => match player_detail(&selected, id, lang) {
+                    Some(selected) => match player_detail(&selected, id, &meter.party_snapshot().member_ids, lang) {
                         Some(player) => (200, player, false),
                         None => (404, json!({"error": "player not found"}), false),
                     },
@@ -484,12 +490,14 @@ fn class_info(class: &str, lang: &str) -> (Option<u32>, Option<&'static str>) {
     (Some(id), Some(if lang == "ru" { ru } else { en }))
 }
 
-fn player_json(p: &PlayerOverviewStat, self_id: Option<u32>, owners: Option<&HashSet<u32>>, lang: &str) -> Value {
+fn player_json(p: &PlayerOverviewStat, self_id: Option<u32>, owners: Option<&HashSet<u32>>,
+    party_ids: &HashSet<u32>, lang: &str) -> Value {
     let (class_id, class_name) = class_info(&p.actor_class, lang);
     let class_icon = class_id.map(|_| format!("aion2/class/{}.png", p.actor_class.to_ascii_lowercase()));
     json!({"id": p.actor_id, "name": if p.actor_name.is_empty() { None } else { Some(p.actor_name.as_str()) },
         "classId": class_id, "className": class_name, "classIcon": class_icon,
         "isSelf": self_id.map(|id| id == p.actor_id),
+        "inParty": self_id == Some(p.actor_id) || party_ids.contains(&p.actor_id),
         "isSummonOwner": owners.map(|ids| ids.contains(&p.actor_id)), "damage": p.total_damage,
         "dps": p.dps, "share": p.damage_share, "hits": p.counts,
         "critRate": (p.counts > 0).then(|| *p.special_counts.get("CRITICAL").unwrap_or(&0) as f64 / p.counts as f64),
@@ -499,7 +507,7 @@ fn player_json(p: &PlayerOverviewStat, self_id: Option<u32>, owners: Option<&Has
 
 fn fight_state(id: String, active: bool, target: Option<&TargetInfo>,
     stats: &HashMap<u32, PlayerOverviewStat>, self_id: Option<u32>, owners: Option<&HashSet<u32>>,
-    fallback_ms: u64, lang: &str) -> Value
+    party_ids: &HashSet<u32>, fallback_ms: u64, lang: &str) -> Value
 {
     let (started, duration) = timing(target, fallback_ms);
     let total: u64 = stats.values().map(|p| p.total_damage).sum();
@@ -507,7 +515,7 @@ fn fight_state(id: String, active: bool, target: Option<&TargetInfo>,
     players.sort_by(|a, b| b.total_damage.cmp(&a.total_damage));
     json!({"fightId": id, "active": active, "startedAt": started,
         "durationSec": duration, "target": target_json(target, lang), "totalDamage": total,
-        "players": players.into_iter().map(|p| player_json(p, self_id, owners, lang)).collect::<Vec<_>>()})
+        "players": players.into_iter().map(|p| player_json(p, self_id, owners, party_ids, lang)).collect::<Vec<_>>()})
 }
 
 fn current_target(snapshot: &CombatSnapshot) -> Option<u32> {
@@ -542,7 +550,7 @@ fn targets_json(snapshot: Option<&CombatSnapshot>, lang: &str) -> Value {
     json!(rows.into_iter().take(20).map(|r| r.2).collect::<Vec<_>>())
 }
 
-fn current_state(snapshot: Option<&CombatSnapshot>, owners: &HashSet<u32>, pinned: Option<u32>, lang: &str) -> Value {
+fn current_state(snapshot: Option<&CombatSnapshot>, owners: &HashSet<u32>, party_ids: &HashSet<u32>, pinned: Option<u32>, lang: &str) -> Value {
     let Some(snapshot) = snapshot else {
         return json!({"fightId": null, "active": false, "startedAt": null,
             "durationSec": 0.0, "target": null, "totalDamage": 0, "players": []});
@@ -556,7 +564,7 @@ fn current_state(snapshot: Option<&CombatSnapshot>, owners: &HashSet<u32>, pinne
     let (started, _) = timing(target, fallback);
     let mut state = fight_state(format!("{id}-{started}"), true, target,
         &snapshot.by_target_player_stats[&id], snapshot.combat_infos.main_actor_id,
-        Some(owners), fallback, lang);
+        Some(owners), party_ids, fallback, lang);
     let boss = snapshot.by_target_player_stats.keys()
         .filter_map(|tid| snapshot.combat_infos.target_infos.get(tid).filter(|t| t.is_boss && t.target_mob_code.is_some()))
         .max_by(|a, b| {
@@ -569,14 +577,18 @@ fn current_state(snapshot: Option<&CombatSnapshot>, owners: &HashSet<u32>, pinne
     state
 }
 
-fn record_state(record: &HistoryRecord, lang: &str) -> Value {
+fn record_state(record: &HistoryRecord, current_party_ids: &HashSet<u32>, lang: &str) -> Value {
+    let party_ids = record.party_member_ids.as_ref().unwrap_or(current_party_ids);
     fight_state(record.id.clone(), false, record.target_info.as_ref(), &record.player_stats,
-        record.combat_infos.main_actor_id, record.summon_owner_ids.as_ref(), record.created_at, lang)
+        record.combat_infos.main_actor_id, record.summon_owner_ids.as_ref(), party_ids, record.created_at, lang)
 }
 
-fn history_row(record: &HistoryRecord, lang: &str) -> Value {
+fn history_row(record: &HistoryRecord, current_party_ids: &HashSet<u32>, lang: &str) -> Value {
     let (started, duration) = timing(record.target_info.as_ref(), record.created_at);
     let self_stat = record.combat_infos.main_actor_id.and_then(|id| record.player_stats.get(&id));
+    let party_ids = record.party_member_ids.as_ref().unwrap_or(current_party_ids);
+    let mut players: Vec<_> = record.player_stats.values().collect();
+    players.sort_by(|a, b| b.total_damage.cmp(&a.total_damage));
     json!({"fightId": record.id, "startedAt": started, "durationSec": duration,
         "target": record.target_info.as_ref().and_then(|t| target_name(t, lang)),
         "isBoss": record.target_info.as_ref().and_then(|t| t.target_mob_code.map(|_| t.is_boss)),
@@ -584,7 +596,9 @@ fn history_row(record: &HistoryRecord, lang: &str) -> Value {
         "selfShare": self_stat.map(|s| s.damage_share),
         "healTotal": record.player_stats.values().map(|p| p.heal_total).sum::<u64>(),
         "hps": self_stat.map(|s| s.hps), "deaths": record.player_stats.values().map(|p| p.deaths).sum::<u32>(),
-        "selfCp": self_stat.and_then(|s| s.combat_power), "selfDeaths": self_stat.map(|s| s.deaths)})
+        "selfCp": self_stat.and_then(|s| s.combat_power), "selfDeaths": self_stat.map(|s| s.deaths),
+        "players": players.into_iter().map(|player| player_json(player, record.combat_infos.main_actor_id,
+            record.summon_owner_ids.as_ref(), party_ids, lang)).collect::<Vec<_>>()})
 }
 
 fn fight_timeline(fight: &SelectedFight, player: u32) -> Option<Value> {
@@ -728,16 +742,17 @@ fn skills_for(meter: &DpsMeter, player: u32, fight: &str, lang: &str) -> Option<
     })
 }
 
-fn player_detail(fight: &SelectedFight, player: u32, lang: &str) -> Option<Value> {
-    let (stats, target, self_id, owners) = match fight {
+fn player_detail(fight: &SelectedFight, player: u32, party_ids: &HashSet<u32>, lang: &str) -> Option<Value> {
+    let (stats, target, self_id, owners, selected_party_ids) = match fight {
         SelectedFight::Current(snapshot, id, owners) => (
             snapshot.by_target_player_stats.get(id)?.get(&player)?,
-            snapshot.combat_infos.target_infos.get(id), snapshot.combat_infos.main_actor_id, Some(owners)),
+            snapshot.combat_infos.target_infos.get(id), snapshot.combat_infos.main_actor_id, Some(owners), party_ids),
         SelectedFight::History(record) => (
             record.player_stats.get(&player)?, record.target_info.as_ref(),
-            record.combat_infos.main_actor_id, record.summon_owner_ids.as_ref()),
+            record.combat_infos.main_actor_id, record.summon_owner_ids.as_ref(),
+            record.party_member_ids.as_ref().unwrap_or(party_ids)),
     };
-    let mut value = player_json(stats, self_id, owners, lang);
+    let mut value = player_json(stats, self_id, owners, selected_party_ids, lang);
     let start = target.and_then(|t| t.target_start_time.get(&player)).copied();
     let end = target.and_then(|t| t.target_last_time.get(&player)).copied();
     let fight_sec = start.zip(end).map(|(a, b)| (b - a).max(1.0));

@@ -227,6 +227,10 @@ impl DpsMeter {
         self.data_storage.summon_owner_snapshot().into_values().collect()
     }
 
+    pub fn party_snapshot(&self) -> crate::dps_meter::storage::data_storage::PartySnapshot {
+        self.data_storage.party_snapshot()
+    }
+
     pub fn field_boss_timer_snapshot(&self) -> Vec<(u32, u32, u64, u64)> {
         self.data_storage.field_boss_timer_snapshot()
     }
@@ -395,7 +399,11 @@ impl DpsMeter {
         if snapshot.total_damage == 0 {
             return;
         }
-        let saved = self.history.save_and_clear(snapshot, self.summon_owner_ids());
+        let saved = self.history.save_and_clear(
+            snapshot,
+            self.summon_owner_ids(),
+            self.data_storage.party_snapshot().member_ids,
+        );
         let _ = self.app.emit("history-updated", ());
         if self.personal_bests.record_and_save(&saved) {
             let _ = self.app.emit("personal-bests-updated", ());

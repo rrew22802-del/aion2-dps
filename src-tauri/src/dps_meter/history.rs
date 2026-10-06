@@ -31,6 +31,8 @@ pub struct HistoryRecord {
     #[serde(default)]
     pub summon_owner_ids: Option<HashSet<u32>>,
     #[serde(default)]
+    pub party_member_ids: Option<HashSet<u32>>,
+    #[serde(default)]
     pub use_buffs_by_target: HashMap<u32, Vec<BuffSummary>>,
     pub created_at: u64,
     #[serde(default)]
@@ -108,15 +110,15 @@ impl HistoryStore {
 
     /// Persist current snapshot as per-target history records, then clear.
     /// Returns what was saved, for the personal bests to learn from.
-    pub fn save_and_clear(&self, snapshot: CombatSnapshot, summon_owner_ids: HashSet<u32>) -> Vec<HistoryRecord> {
-        let records = Self::extract_records(snapshot, summon_owner_ids);
+    pub fn save_and_clear(&self, snapshot: CombatSnapshot, summon_owner_ids: HashSet<u32>, party_member_ids: HashSet<u32>) -> Vec<HistoryRecord> {
+        let records = Self::extract_records(snapshot, summon_owner_ids, party_member_ids);
         if !records.is_empty() {
             self.push(records.clone());
         }
         records
     }
 
-    fn extract_records(snapshot: CombatSnapshot, summon_owner_ids: HashSet<u32>) -> Vec<HistoryRecord> {
+    fn extract_records(snapshot: CombatSnapshot, summon_owner_ids: HashSet<u32>, party_member_ids: HashSet<u32>) -> Vec<HistoryRecord> {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -179,6 +181,7 @@ impl HistoryStore {
                     combat_infos,
                     player_stats,
                     summon_owner_ids: Some(summon_owner_ids.clone()),
+                    party_member_ids: Some(party_member_ids.clone()),
                     player_skill_stats: skill_stats,
                     use_buffs_by_target,
                     created_at: now_ms,

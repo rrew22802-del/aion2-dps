@@ -14,6 +14,8 @@ use crate::plugins::logger::AppLogger;
 const KNOWN_PACKET_HEADERS: &[(u8, u8)] = &[
     (0x33, 0x36),
     (0x45, 0x36),
+    (0x45, 0x37),
+    (0x45, 0x38),
     (0x56, 0x36),
     (0x41, 0x36),
     (0x04, 0x38),
@@ -392,6 +394,9 @@ impl StreamProcessor {
                 (0x45, 0x36) => {
                     nickname::parse_other(&self.parser_context(), payload, is_compressed_bundle)
                 }
+                (0x45, 0x37) | (0x45, 0x38) => {
+                    nickname::parse_party_action(&self.parser_context(), payload)
+                }
                 (0x56, 0x36) => nickname::parse_main_combat_power(
                     &self.parser_context(),
                     payload,
@@ -443,6 +448,9 @@ impl StreamProcessor {
                 }
                 (0x45, 0x36) => {
                     nickname::parse_other(&self.parser_context(), payload, is_compressed_bundle)
+                }
+                (0x45, 0x37) | (0x45, 0x38) => {
+                    nickname::parse_party_action(&self.parser_context(), payload)
                 }
                 (0x56, 0x36) => nickname::parse_main_combat_power(
                     &self.parser_context(),

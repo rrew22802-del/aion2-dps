@@ -22,6 +22,23 @@ const MOB_METADATA_CAPACITY: usize = 5_000;
 const COMBAT_TARGET_CAPACITY: usize = 512;
 const SUMMON_METADATA_CAPACITY: usize = 5_000;
 const COMBAT_EVENT_CAPACITY: usize = 100_000;
+const PARTY_MEMBER_CAPACITY: usize = 24;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartyMember {
+    pub id: u32,
+    pub name: String,
+    pub class: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartySnapshot {
+    pub members: Vec<PartyMember>,
+    pub updated_at: Option<u64>,
+    pub member_ids: HashSet<u32>,
+}
 
 const BUFF_TARGET_CAPACITY: usize = 1_024;
 const BUFF_INTERVALS_PER_SKILL_CAPACITY: usize = 1_024;
@@ -173,6 +190,8 @@ struct DataStorageInner {
     player_deaths: BoundedMap<u32, u32>,
     dead_entities: HashSet<u32>,
     combat_events: VecDeque<CombatEvent>,
+    party_members: BoundedMap<u32, PartyMember>,
+    party_updated_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -220,6 +239,8 @@ impl Default for DataStorageInner {
             player_deaths: BoundedMap::new(ACTOR_METADATA_CAPACITY),
             dead_entities: HashSet::new(),
             combat_events: VecDeque::new(),
+            party_members: BoundedMap::new(PARTY_MEMBER_CAPACITY),
+            party_updated_at: None,
         }
     }
 }
@@ -273,6 +294,8 @@ impl DataStorage {
         let actor_id_class_map = inner.actor_id_class_map.clone();
         let actor_id_combat_power_map = inner.actor_id_combat_power_map.clone();
         let actor_id_skill_spec_map = inner.actor_id_skill_spec_map.clone();
+        let party_members = inner.party_members.clone();
+        let party_updated_at = inner.party_updated_at;
 
         let mob_id_code_map = inner.mob_id_code_map.clone();
         let mob_id_hp_map = inner.mob_id_hp_map.clone();
@@ -296,6 +319,8 @@ impl DataStorage {
         inner.actor_id_class_map = actor_id_class_map;
         inner.actor_id_combat_power_map = actor_id_combat_power_map;
         inner.actor_id_skill_spec_map = actor_id_skill_spec_map;
+        inner.party_members = party_members;
+        inner.party_updated_at = party_updated_at;
 
         inner.mob_id_code_map = mob_id_code_map;
         inner.mob_id_hp_map = mob_id_hp_map;
@@ -585,6 +610,58 @@ impl DataStorage {
             .insert(actor_id, actor_class.to_string());
     }
 
+    /// A 45 36 member-info update is the only confirmed party membership
+    /// message so far. Refresh the member metadata without moving owned strings
+    /// out of a parser closure.
+    pub fn upsert_party_member(&self, actor_id: u32, name: &str, class: Option<&str>) {
+        let mut inner = self.inner.write().unwrap();
+        inner.party_members.insert(actor_id, PartyMember {
+            id: actor_id,
+            name: name.to_string(),
+            class: class.map(str::to_string),
+        });
+        inner.party_updated_at = Some(current_timestamp_millis());
+    }
+
+    pub fn remove_party_member(&self, actor_id: u32) {
+        let mut inner = self.inner.write().unwrap();
+        if inner.main_actor_id == Some(actor_id) { return; }
+        if inner.party_members.map.remove(&actor_id).is_some() {
+            inner.party_members.order.retain(|id| *id != actor_id);
+            inner.party_updated_at = Some(current_timestamp_millis());
+        }
+    }
+
+    pub fn clear_party(&self) {
+        let mut inner = self.inner.write().unwrap();
+        let self_member = inner.main_actor_id.and_then(|id| {
+            inner.actor_id_name_map.get(&id).map(|name| PartyMember {
+                id,
+                name: name.clone(),
+                class: inner.actor_id_class_map.get(&id).cloned(),
+            })
+        });
+        let self_member_count = if self_member.is_some() { 1 } else { 0 };
+        let changed = inner.party_members.map.len() != self_member_count
+            || self_member.as_ref().is_some_and(|member| !inner.party_members.map.contains_key(&member.id));
+        if changed {
+            inner.party_members.map.clear();
+            inner.party_members.order.clear();
+            if let Some(member) = self_member {
+                inner.party_members.insert(member.id, member);
+            }
+            inner.party_updated_at = Some(current_timestamp_millis());
+        }
+    }
+
+    pub fn party_snapshot(&self) -> PartySnapshot {
+        let inner = self.inner.read().unwrap();
+        let mut members: Vec<_> = inner.party_members.map.values().cloned().collect();
+        members.sort_by_key(|member| member.id);
+        let member_ids = members.iter().map(|member| member.id).collect();
+        PartySnapshot { members, updated_at: inner.party_updated_at, member_ids }
+    }
+
     pub fn set_actor_combat_power(&self, actor_id: u32, combat_power: u64) {
         if combat_power == 0 || combat_power > 10_000_000 {
             return;
@@ -702,10 +779,14 @@ impl DataStorage {
     pub fn set_main_actor(&self, actor_id: u32, actor_name: &str) {
         let (sid, is_new_player) = {
             let mut inner = self.inner.write().unwrap();
-            let is_new_player = main_actor_changed(inner.main_actor_name.as_deref(), actor_name)
+            let is_new_player = (inner.main_actor_id.is_some_and(|current_id| current_id != actor_id)
+                || main_actor_changed(inner.main_actor_name.as_deref(), actor_name))
                 && !(inner.main_actor_id == Some(actor_id) && inner.main_actor_name.as_deref() == Some(""));
             if is_new_player {
                 inner.main_actor_combat_power = None;
+                inner.party_members.map.clear();
+                inner.party_members.order.clear();
+                inner.party_updated_at = Some(current_timestamp_millis());
             }
             inner.main_actor_id = Some(actor_id);
             inner.main_actor_name = Some(actor_name.to_string());
