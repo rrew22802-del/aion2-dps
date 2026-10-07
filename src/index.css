@@ -31,49 +31,59 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+/*
+ * dbaion2.ru's own Nebula / Nebula Light palettes (see docs/DBAION2.md),
+ * not upstream's neutral greys. Alpha-blended WPF brushes (the site's own
+ * translucent glass panels) are flattened to their solid RGB here — this
+ * app already layers its own translucency with Tailwind opacity utilities
+ * (bg-white/6 and friends) on top of whatever these variables hold, the
+ * same way it did with the greys it replaces.
+ */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  /* Nebula Light: Panel, Ink, Accent, Field, Edge, HoverBrush, Bad. */
+  --background: #ffffff;
+  --foreground: #243967;
+  --card: #ffffff;
+  --card-foreground: #243967;
+  --popover: #ffffff;
+  --popover-foreground: #243967;
+  --primary: #3f63bb;
+  --primary-foreground: #ffffff;
+  --secondary: #f2f0ff;
+  --secondary-foreground: #243967;
+  --muted: #f2f0ff;
+  --muted-foreground: #667aa7;
+  --accent: #e6edff;
+  --accent-foreground: #243967;
+  --destructive: #b34a5e;
+  --destructive-foreground: #ffffff;
+  --border: #cbd8f2;
+  --input: #cbd8f2;
+  --ring: #3f63bb;
   --radius: 0.625rem;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.145 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.145 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.985 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.396 0.141 25.723);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.269 0 0);
-  --input: oklch(0.269 0 0);
-  --ring: oklch(0.439 0 0);
+  /* Nebula (dark): Panel, Ink, Accent, PanelSoft, Edge, HoverBrush, Bad. */
+  --background: #0c142c;
+  --foreground: #f3f5ff;
+  --card: #0c142c;
+  --card-foreground: #f3f5ff;
+  --popover: #0c142c;
+  --popover-foreground: #f3f5ff;
+  --primary: #9fc0ff;
+  --primary-foreground: #091738;
+  --secondary: #101a38;
+  --secondary-foreground: #f3f5ff;
+  --muted: #101a38;
+  --muted-foreground: #a9b7d4;
+  --accent: #40608f;
+  --accent-foreground: #f3f5ff;
+  --destructive: #c04a5e;
+  --destructive-foreground: #f3f5ff;
+  --border: #97b3f2;
+  --input: #97b3f2;
+  --ring: #9fc0ff;
 }
 
 /*
@@ -121,6 +131,66 @@
    filter runs on the compositor, so the video costs nothing extra. */
 .light .bg-artwork {
   filter: invert(1);
+}
+
+/* Only the main app frame: overlay windows use their own documents and styles. */
+.main-window-frame {
+  background:
+    radial-gradient(ellipse at 72% 24%, rgba(137, 107, 246, 0.27), transparent 48%),
+    linear-gradient(135deg, #0b1026, #1a1f4d);
+}
+
+.light .main-window-frame {
+  background:
+    radial-gradient(ellipse at 72% 24%, rgba(166, 145, 245, 0.22), transparent 48%),
+    linear-gradient(135deg, #f6f9ff, #e6edff);
+}
+
+.main-window-sidebar {
+  color: var(--foreground);
+  background: rgba(20, 26, 60, 0.72);
+  border-right: 1px solid rgba(160, 180, 255, 0.18);
+  backdrop-filter: blur(18px);
+}
+
+.light .main-window-sidebar {
+  background: rgba(255, 255, 255, 0.72);
+  border-right-color: rgba(100, 125, 190, 0.24);
+}
+
+.sidebar-nav-link {
+  display: flex;
+  height: 42px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--foreground);
+  transition: color 150ms ease;
+}
+
+.sidebar-nav-link:hover {
+  color: #a7bdff;
+}
+
+.light .sidebar-nav-link:hover {
+  color: #3f63bb;
+}
+
+.sidebar-nav-active,
+.sidebar-nav-active:hover {
+  background: linear-gradient(110deg, #a7bdff, #a495ff);
+  color: #091738;
+  font-weight: 700;
+  box-shadow: 0 0 21px rgba(143, 134, 255, 0.35);
+}
+
+.light .sidebar-nav-active,
+.light .sidebar-nav-active:hover {
+  background: linear-gradient(110deg, #a8c6ff, #c2affb);
+  color: #193267;
 }
 
 @layer base {

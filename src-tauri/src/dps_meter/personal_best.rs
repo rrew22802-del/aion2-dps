@@ -203,6 +203,9 @@ mod tests {
                 dps,
                 damage_share: 1.0,
                 damage_contribution: 1.0,
+                heal_total: 0,
+                hps: 0.0,
+                deaths: 0,
             },
         );
         HistoryRecord {
@@ -230,8 +233,11 @@ mod tests {
             },
             player_skill_stats: HashMap::new(),
             player_stats,
+            summon_owner_ids: None,
             use_buffs_by_target: HashMap::new(),
             created_at: 1,
+            combat_events: Vec::new(),
+            buff_intervals: HashMap::new(),
         }
     }
 

@@ -1,5 +1,9 @@
 # Fork notes
 
+> This repository is itself a fork of Aether (the project this file describes), rebranded as
+> "DBAion2 DPS" for dbaion2.ru. See [docs/DBAION2.md](./docs/DBAION2.md) for that second step;
+> everything below is unchanged and still describes Aether's own fork of NOIA2.
+
 This is a personal fork of [NOIA2](https://github.com/ZDYoung0519/NOIA2) by zdyoung,
 tracked as the git remote `upstream`.
 

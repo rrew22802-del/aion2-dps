@@ -8,11 +8,13 @@ use tauri::{AppHandle, Emitter};
 
 use crate::dps_meter::config::{SharedDpsMeterConfig, TRAINING_DUMMY_MOB_CODE};
 use crate::dps_meter::models::combat::{
-    BuffInterval, BuffSummary, PlayerHpInfo, PvpCombatStats, PvpCombatStatsRow, PvpKnownPlayer,
+    BossCast, DeathRecap, RecapEvent, TakenSourceStat, BuffInterval, BuffSummary, PlayerHpInfo, PvpCombatStats, PvpCombatStatsRow, PvpKnownPlayer,
     PvpWatchInfo, PvpWatchInfoResponse, SkillStats,
 };
 use crate::dps_meter::models::packet::ParsedDamagePacket;
+use crate::dps_meter::models::combat::CombatEvent;
 use crate::dps_meter::storage::loaders::{load_boss_ids, load_healing_skill_codes, load_npc_names};
+use crate::dps_meter::storage::nearby::{NearbyPlayer, NearbyPlayers, Position};
 
 const ACTOR_METADATA_CAPACITY: usize = 2_000;
 const MOB_METADATA_CAPACITY: usize = 5_000;
@@ -20,6 +22,29 @@ const MOB_METADATA_CAPACITY: usize = 5_000;
 /// still small enough that cloning the map stays cheap.
 const COMBAT_TARGET_CAPACITY: usize = 512;
 const SUMMON_METADATA_CAPACITY: usize = 5_000;
+const COMBAT_EVENT_CAPACITY: usize = 100_000;
+const DEATH_RECAP_CAPACITY: usize = 128;
+const RECENT_PLAYER_EVENTS: usize = 2_000;
+const RECENT_EVENTS_PER_PLAYER: usize = 10;
+const BOSS_CAST_CAPACITY: usize = 5_000;
+const TAKEN_PLAYERS_PER_FIGHT: usize = 24;
+const PARTY_MEMBER_CAPACITY: usize = 24;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartyMember {
+    pub id: u32,
+    pub name: String,
+    pub class: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartySnapshot {
+    pub members: Vec<PartyMember>,
+    pub updated_at: Option<u64>,
+    pub member_ids: HashSet<u32>,
+}
 
 const BUFF_TARGET_CAPACITY: usize = 1_024;
 const BUFF_INTERVALS_PER_SKILL_CAPACITY: usize = 1_024;
@@ -140,6 +165,7 @@ struct DataStorageInner {
     mob_id_hp_map: BoundedMap<u32, (u32, u32)>,
     player_hp_map: BoundedMap<u32, PlayerHpInfo>,
     use_buffs_by_target: BoundedMap<u32, HashMap<u32, HashMap<u32, VecDeque<BuffInterval>>>>,
+    own_skill_uses: HashMap<u32, (u64, u32)>,
     possible_boss_codes: HashSet<u32>,
     summon_owner_map: BoundedMap<u32, u32>,
     start_time: Option<f64>,
@@ -153,6 +179,8 @@ struct DataStorageInner {
     dot_skill_list: Vec<u32>,
     main_actor_id: Option<u32>,
     main_actor_name: Option<String>,
+    self_packet_counts: HashMap<u32, u32>,
+    self_packet_total: u32,
     main_actor_combat_power: Option<u64>,
     last_target: Option<u32>,
     last_target_by_main_actor: Option<u32>,
@@ -161,6 +189,21 @@ struct DataStorageInner {
     pvp_last_attacker_by_target: HashMap<u32, PvpPlayerKey>,
     pvp_combat_stats: HashMap<PvpPlayerKey, PvpCombatStats>,
     pvp_dead_players: HashSet<PvpPlayerKey>,
+    /// Scheduled field-boss spawn timestamps, keyed by (map id, mob code).
+    field_boss_timers: HashMap<(u32, u32), (u64, u64)>,
+    healing_totals: BoundedMap<u32, u64>,
+    healing_by_target: BoundedMap<u32, HashMap<u32, u64>>,
+    player_deaths: BoundedMap<u32, u32>,
+    dead_entities: HashSet<u32>,
+    combat_events: VecDeque<CombatEvent>,
+    party_members: BoundedMap<u32, PartyMember>,
+    party_updated_at: Option<u64>,
+    nearby_players: NearbyPlayers,
+    nearby_self_position: Option<Position>,
+    damage_taken_by_target: BoundedMap<u32, HashMap<u32, Vec<TakenSourceStat>>>,
+    recent_player_events: BoundedMap<u32, VecDeque<RecapEvent>>,
+    death_recaps_by_target: BoundedMap<u32, VecDeque<DeathRecap>>,
+    boss_casts_by_target: BoundedMap<u32, VecDeque<BossCast>>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -182,6 +225,7 @@ impl Default for DataStorageInner {
             mob_id_hp_map: BoundedMap::new(MOB_METADATA_CAPACITY),
             player_hp_map: BoundedMap::new(ACTOR_METADATA_CAPACITY),
             use_buffs_by_target: BoundedMap::new(BUFF_TARGET_CAPACITY),
+            own_skill_uses: HashMap::new(),
             possible_boss_codes: HashSet::new(),
             summon_owner_map: BoundedMap::new(SUMMON_METADATA_CAPACITY),
             start_time: None,
@@ -191,6 +235,8 @@ impl Default for DataStorageInner {
             dot_skill_list: Vec::new(),
             main_actor_id: None,
             main_actor_name: None,
+            self_packet_counts: HashMap::new(),
+            self_packet_total: 0,
             main_actor_combat_power: None,
             last_target: None,
             last_target_by_main_actor: None,
@@ -199,6 +245,20 @@ impl Default for DataStorageInner {
             pvp_last_attacker_by_target: HashMap::new(),
             pvp_combat_stats: HashMap::new(),
             pvp_dead_players: HashSet::new(),
+            field_boss_timers: HashMap::new(),
+            healing_totals: BoundedMap::new(ACTOR_METADATA_CAPACITY),
+            healing_by_target: BoundedMap::new(COMBAT_TARGET_CAPACITY),
+            player_deaths: BoundedMap::new(ACTOR_METADATA_CAPACITY),
+            dead_entities: HashSet::new(),
+            combat_events: VecDeque::new(),
+            party_members: BoundedMap::new(PARTY_MEMBER_CAPACITY),
+            party_updated_at: None,
+            nearby_players: NearbyPlayers::default(),
+            nearby_self_position: None,
+            damage_taken_by_target: BoundedMap::new(COMBAT_TARGET_CAPACITY),
+            recent_player_events: BoundedMap::new(RECENT_PLAYER_EVENTS),
+            death_recaps_by_target: BoundedMap::new(COMBAT_TARGET_CAPACITY),
+            boss_casts_by_target: BoundedMap::new(COMBAT_TARGET_CAPACITY),
         }
     }
 }
@@ -244,12 +304,18 @@ impl DataStorage {
         let mut inner = self.inner.write().unwrap();
         let main_actor_id = inner.main_actor_id;
         let main_actor_name = inner.main_actor_name.clone();
+        let self_packet_counts = inner.self_packet_counts.clone();
+        let self_packet_total = inner.self_packet_total;
         let main_actor_combat_power = inner.main_actor_combat_power;
         let actor_id_name_map = inner.actor_id_name_map.clone();
         let actor_id_server_map = inner.actor_id_server_map.clone();
         let actor_id_class_map = inner.actor_id_class_map.clone();
         let actor_id_combat_power_map = inner.actor_id_combat_power_map.clone();
         let actor_id_skill_spec_map = inner.actor_id_skill_spec_map.clone();
+        let party_members = inner.party_members.clone();
+        let party_updated_at = inner.party_updated_at;
+        let nearby_players = inner.nearby_players.clone();
+        let nearby_self_position = inner.nearby_self_position;
 
         let mob_id_code_map = inner.mob_id_code_map.clone();
         let mob_id_hp_map = inner.mob_id_hp_map.clone();
@@ -258,18 +324,25 @@ impl DataStorage {
         let pvp_last_attacker_by_target = inner.pvp_last_attacker_by_target.clone();
         let pvp_combat_stats = inner.pvp_combat_stats.clone();
         let pvp_dead_players = inner.pvp_dead_players.clone();
+        let field_boss_timers = inner.field_boss_timers.clone();
         // let summon_owner_map = inner.summon_owner_map.clone();
         let dot_skill_list = inner.dot_skill_list.clone();
 
         *inner = DataStorageInner::default();
         inner.main_actor_id = main_actor_id;
         inner.main_actor_name = main_actor_name;
+        inner.self_packet_counts = self_packet_counts;
+        inner.self_packet_total = self_packet_total;
         inner.main_actor_combat_power = main_actor_combat_power;
         inner.actor_id_name_map = actor_id_name_map;
         inner.actor_id_server_map = actor_id_server_map;
         inner.actor_id_class_map = actor_id_class_map;
         inner.actor_id_combat_power_map = actor_id_combat_power_map;
         inner.actor_id_skill_spec_map = actor_id_skill_spec_map;
+        inner.party_members = party_members;
+        inner.party_updated_at = party_updated_at;
+        inner.nearby_players = nearby_players;
+        inner.nearby_self_position = nearby_self_position;
 
         inner.mob_id_code_map = mob_id_code_map;
         inner.mob_id_hp_map = mob_id_hp_map;
@@ -278,6 +351,7 @@ impl DataStorage {
         inner.pvp_last_attacker_by_target = pvp_last_attacker_by_target;
         inner.pvp_combat_stats = pvp_combat_stats;
         inner.pvp_dead_players = pvp_dead_players;
+        inner.field_boss_timers = field_boss_timers;
         // inner.summon_owner_map = summon_owner_map;
         inner.dot_skill_list = dot_skill_list;
     }
@@ -352,7 +426,25 @@ impl DataStorage {
         let config = self.config.read().unwrap().clone();
         let mut inner = self.inner.write().unwrap();
 
-        if self.healing_skill_codes.contains(&packet.skill_code) {
+        let at_ms = (timestamp.max(0.0) * 1000.0) as u64;
+        let is_heal = self.healing_skill_codes.contains(&packet.skill_code);
+        if is_heal {
+            if packet.actor_id != 0 && packet.damage > 0 {
+                let actor = inner.summon_owner_map.get(&packet.actor_id).copied().unwrap_or(packet.actor_id);
+                let total = inner.healing_totals.get_mut_or_insert_with(actor, || 0);
+                *total = total.saturating_add(packet.damage);
+                let target = inner.last_target_by_main_actor.or(inner.last_target).unwrap_or(packet.target_id);
+                let actor_heals = inner.healing_by_target.get_mut_or_insert_with(target, HashMap::new).entry(actor).or_default();
+                *actor_heals = actor_heals.saturating_add(packet.damage);
+                if inner.actor_id_name_map.contains_key(&packet.target_id) && !inner.mob_id_code_map.contains_key(&packet.target_id) {
+                    let event = RecapEvent { kind: "heal".into(), source_id: packet.actor_id,
+                        source_name: inner.actor_id_name_map.get(&packet.actor_id).cloned(), skill_code: packet.ori_skill_code,
+                        amount: packet.damage, crit: false, at_ms, hp_after: None };
+                    let events = inner.recent_player_events.get_mut_or_insert_with(packet.target_id, VecDeque::new);
+                    events.push_back(event);
+                    while events.len() > RECENT_EVENTS_PER_PLAYER { events.pop_front(); }
+                }
+            }
             return;
         }
 
@@ -366,6 +458,7 @@ impl DataStorage {
         if let Some(owner_id) = inner.summon_owner_map.get(&actor_id) {
             actor_id = *owner_id;
         }
+        inner.nearby_players.add_damage(actor_id, packet.damage, (timestamp.max(0.0) * 1000.0) as u64);
 
         let target_mob_code = inner.mob_id_code_map.get(&packet.target_id).copied();
         let is_target_boss = target_mob_code
@@ -376,6 +469,38 @@ impl DataStorage {
             .unwrap_or(false);
         let is_target_player = inner.actor_id_name_map.contains_key(&packet.target_id)
             && !inner.mob_id_code_map.contains_key(&packet.target_id);
+
+        if is_target_player {
+            let source_entity_id = packet.actor_id;
+            let source_name = inner.actor_id_name_map.get(&source_entity_id).cloned();
+            let npc_id = inner.mob_id_code_map.get(&source_entity_id).copied();
+            if let Some(fight_target) = inner.last_target_by_main_actor.or(inner.last_target) {
+                let can_track_player = inner.damage_taken_by_target.get(&fight_target)
+                    .is_some_and(|players| players.contains_key(&packet.target_id) || players.len() < TAKEN_PLAYERS_PER_FIGHT)
+                    || !inner.damage_taken_by_target.contains_key(&fight_target);
+                if can_track_player {
+                    let taken = inner.damage_taken_by_target.get_mut_or_insert_with(fight_target, HashMap::new)
+                        .entry(packet.target_id).or_default();
+                    if let Some(existing) = taken.iter_mut().find(|entry| entry.source_id == source_entity_id && entry.skill_code == packet.ori_skill_code) {
+                        existing.damage = existing.damage.saturating_add(packet.damage);
+                    } else if taken.len() < 128 {
+                        taken.push(TakenSourceStat { source_id: source_entity_id, npc_id, source_name: source_name.clone(), skill_code: packet.ori_skill_code, damage: packet.damage });
+                    }
+                }
+            }
+            let events = inner.recent_player_events.get_mut_or_insert_with(packet.target_id, VecDeque::new);
+            events.push_back(RecapEvent { kind: "hit".into(), source_id: source_entity_id, source_name,
+                skill_code: packet.ori_skill_code, amount: packet.damage, crit: packet.is_crit, at_ms, hp_after: None });
+            while events.len() > RECENT_EVENTS_PER_PLAYER { events.pop_front(); }
+        }
+
+        if let Some(npc_id) = inner.mob_id_code_map.get(&packet.actor_id).copied() {
+            if let Some(fight_target) = inner.last_target_by_main_actor.or(inner.last_target) {
+                let casts = inner.boss_casts_by_target.get_mut_or_insert_with(fight_target, VecDeque::new);
+                casts.push_back(BossCast { npc_id, skill: packet.ori_skill_code, at_ms });
+                while casts.len() > BOSS_CAST_CAPACITY { casts.pop_front(); }
+            }
+        }
 
         if config.boss_only && !is_target_boss && !(config.pvp_mode_on && is_target_player) {
             self.boss_only_filtered.fetch_add(1, Ordering::Relaxed);
@@ -388,6 +513,16 @@ impl DataStorage {
         {
             return;
         }
+
+        inner.combat_events.push_back(CombatEvent {
+            actor_id,
+            target_id: packet.target_id,
+            skill_code: packet.ori_skill_code,
+            damage: packet.damage,
+            is_crit: packet.is_crit,
+            at_ms: (timestamp.max(0.0) * 1000.0) as u64,
+        });
+        while inner.combat_events.len() > COMBAT_EVENT_CAPACITY { inner.combat_events.pop_front(); }
 
         if config.pvp_mode_on && is_target_player {
             let actor = pvp_player_key(&inner, actor_id);
@@ -504,6 +639,13 @@ impl DataStorage {
             }
         }
 
+        if inner.main_actor_id == Some(packet.actor_id) {
+            let last_ms = (timestamp * 1000.0).max(0.0) as u64;
+            let entry = inner.own_skill_uses.entry(stats_skill_code).or_insert((last_ms, 0));
+            entry.0 = entry.0.max(last_ms);
+            entry.1 = entry.1.saturating_add(1);
+        }
+
         if is_own_fight(&inner, actor_id, packet.target_id) {
             inner.activity_at = Some(timestamp);
         }
@@ -525,12 +667,95 @@ impl DataStorage {
         inner.summon_owner_map.map.remove(&actor_id);
     }
 
+    pub fn upsert_nearby_player(&self, actor_id: u32, server: Option<u32>, class: Option<&'static str>, cp: Option<u64>) {
+        let now = current_timestamp_millis();
+        self.inner.write().unwrap().nearby_players.upsert(actor_id, server, class, cp, now);
+    }
+
+    pub fn nearby_snapshot(&self) -> (Option<u32>, Option<Position>, Vec<NearbyPlayer>) {
+        let now = current_timestamp_millis();
+        let mut inner = self.inner.write().unwrap();
+        let self_id = inner.main_actor_id;
+        let self_position = inner.nearby_self_position;
+        let rows = inner.nearby_players.snapshot(now).into_iter()
+            .filter(|entry| Some(entry.id) != self_id)
+            .map(|entry| NearbyPlayer {
+                id: entry.id,
+                name: inner.actor_id_name_map.get(&entry.id).cloned().unwrap_or_default(),
+                server: entry.server,
+                class: entry.class,
+                level: entry.level,
+                cp: entry.cp,
+                legion: entry.legion,
+                last_seen: entry.last_seen,
+                last_position: entry.last_position,
+                in_party: entry.in_party,
+                seen_damage: entry.seen_damage,
+            })
+            .collect();
+        (self_id, self_position, rows)
+    }
+
+    pub fn set_nearby_self_position(&self, position: Option<Position>) {
+        self.inner.write().unwrap().nearby_self_position = position;
+    }
+
     pub fn set_actor_class(&self, actor_id: u32, actor_class: &str) {
         self.inner
             .write()
             .unwrap()
             .actor_id_class_map
             .insert(actor_id, actor_class.to_string());
+    }
+
+    /// Store the local-character metadata for the current party snapshot.
+    pub fn upsert_party_member(&self, actor_id: u32, name: &str, class: Option<&str>) {
+        let mut inner = self.inner.write().unwrap();
+        inner.party_members.insert(actor_id, PartyMember {
+            id: actor_id,
+            name: name.to_string(),
+            class: class.map(str::to_string),
+        });
+        inner.party_updated_at = Some(current_timestamp_millis());
+    }
+
+    pub fn remove_party_member(&self, actor_id: u32) {
+        let mut inner = self.inner.write().unwrap();
+        if inner.main_actor_id == Some(actor_id) { return; }
+        if inner.party_members.map.remove(&actor_id).is_some() {
+            inner.party_members.order.retain(|id| *id != actor_id);
+            inner.party_updated_at = Some(current_timestamp_millis());
+        }
+    }
+
+    pub fn clear_party(&self) {
+        let mut inner = self.inner.write().unwrap();
+        let self_member = inner.main_actor_id.and_then(|id| {
+            inner.actor_id_name_map.get(&id).map(|name| PartyMember {
+                id,
+                name: name.clone(),
+                class: inner.actor_id_class_map.get(&id).cloned(),
+            })
+        });
+        let self_member_count = if self_member.is_some() { 1 } else { 0 };
+        let changed = inner.party_members.map.len() != self_member_count
+            || self_member.as_ref().is_some_and(|member| !inner.party_members.map.contains_key(&member.id));
+        if changed {
+            inner.party_members.map.clear();
+            inner.party_members.order.clear();
+            if let Some(member) = self_member {
+                inner.party_members.insert(member.id, member);
+            }
+            inner.party_updated_at = Some(current_timestamp_millis());
+        }
+    }
+
+    pub fn party_snapshot(&self) -> PartySnapshot {
+        let inner = self.inner.read().unwrap();
+        let mut members: Vec<_> = inner.party_members.map.values().cloned().collect();
+        members.sort_by_key(|member| member.id);
+        let member_ids = members.iter().map(|member| member.id).collect();
+        PartySnapshot { members, updated_at: inner.party_updated_at, member_ids }
     }
 
     pub fn set_actor_combat_power(&self, actor_id: u32, combat_power: u64) {
@@ -650,12 +875,20 @@ impl DataStorage {
     pub fn set_main_actor(&self, actor_id: u32, actor_name: &str) {
         let (sid, is_new_player) = {
             let mut inner = self.inner.write().unwrap();
-            let is_new_player = main_actor_changed(inner.main_actor_name.as_deref(), actor_name);
+            let is_new_player = (inner.main_actor_id.is_some_and(|current_id| current_id != actor_id)
+                || main_actor_changed(inner.main_actor_name.as_deref(), actor_name))
+                && !(inner.main_actor_id == Some(actor_id) && inner.main_actor_name.as_deref() == Some(""));
             if is_new_player {
                 inner.main_actor_combat_power = None;
+                inner.nearby_self_position = None;
+                inner.party_members.map.clear();
+                inner.party_members.order.clear();
+                inner.party_updated_at = Some(current_timestamp_millis());
             }
             inner.main_actor_id = Some(actor_id);
             inner.main_actor_name = Some(actor_name.to_string());
+            inner.self_packet_counts.clear();
+            inner.self_packet_total = 0;
             (
                 inner.actor_id_server_map.get(&actor_id).cloned(),
                 is_new_player,
@@ -680,6 +913,35 @@ impl DataStorage {
                 sid,
             },
         );
+    }
+
+    /// 00 8D usually refers to our own entity, including after a late attach.
+    pub fn observe_self_packet(&self, actor_id: u32) {
+        let inferred = {
+            let mut inner = self.inner.write().unwrap();
+            // the own-only "01 01" form also corrects a main actor that a nickname packet set to someone else
+            // (Global 01.10: other players' fights were shown as ours); counts restart now and then to follow a relog
+            inner.self_packet_total += 1;
+            *inner.self_packet_counts.entry(actor_id).or_insert(0) += 1;
+            let Some(inferred_id) = self_packet_candidate(&inner.self_packet_counts, inner.self_packet_total) else {
+                return;
+            };
+            if inner.main_actor_id == Some(inferred_id) {
+                if inner.self_packet_total > 200 { inner.self_packet_counts.clear(); inner.self_packet_total = 0; }
+                return;
+            }
+            let name = inner.actor_id_name_map.get(&inferred_id).cloned().unwrap_or_default();
+            inner.main_actor_id = Some(inferred_id);
+            inner.main_actor_name = Some(name.clone());
+            inner.self_packet_counts.clear();
+            inner.self_packet_total = 0;
+            Some((inferred_id, name))
+        };
+        if let Some((actor_id, name)) = inferred {
+            let _ = self.app.emit("dps-main-actor-detected", MainActorDetectedPayload {
+                actor_id, actor_name: name, sid: self.actor_id_server_snapshot().get(&actor_id).cloned(),
+            });
+        }
     }
 
     pub fn get_dps_stats_snapshot(&self) -> HashMap<u32, HashMap<u32, HashMap<u32, SkillStats>>> {
@@ -708,6 +970,42 @@ impl DataStorage {
             .unwrap()
             .actor_id_combat_power_map
             .as_hash_map()
+    }
+
+    pub fn healing_totals_snapshot(&self) -> HashMap<u32, u64> {
+        self.inner.read().unwrap().healing_totals.as_hash_map()
+    }
+
+    pub fn healing_by_target_snapshot(&self) -> HashMap<u32, HashMap<u32, u64>> {
+        self.inner.read().unwrap().healing_by_target.as_hash_map()
+    }
+
+    pub fn player_deaths_snapshot(&self) -> HashMap<u32, u32> {
+        self.inner.read().unwrap().player_deaths.as_hash_map()
+    }
+
+    pub fn combat_events_snapshot(&self) -> Vec<CombatEvent> {
+        self.inner.read().unwrap().combat_events.iter().cloned().collect()
+    }
+
+    pub fn extended_fight_snapshot(&self) -> (HashMap<u32, HashMap<u32, Vec<TakenSourceStat>>>, HashMap<u32, Vec<DeathRecap>>, HashMap<u32, Vec<BossCast>>) {
+        let inner = self.inner.read().unwrap();
+        (inner.damage_taken_by_target.as_hash_map(),
+            inner.death_recaps_by_target.as_hash_map().into_iter().map(|(id, values)| (id, values.into_iter().collect())).collect(),
+            inner.boss_casts_by_target.as_hash_map().into_iter().map(|(id, values)| (id, values.into_iter().collect())).collect())
+    }
+
+    pub fn record_player_hp(&self, player_id: u32, hp: u32, at_ms: u64) {
+        let mut inner = self.inner.write().unwrap();
+        if let Some(events) = inner.recent_player_events.get_mut_or_insert_with(player_id, VecDeque::new).back_mut() {
+            if events.at_ms == at_ms { events.hp_after = Some(hp); }
+        }
+        if hp != 0 || !inner.actor_id_name_map.contains_key(&player_id) || inner.dead_entities.contains(&player_id) { return; }
+        let Some(target) = inner.last_target_by_main_actor.or(inner.last_target) else { return; };
+        let events = inner.recent_player_events.get(&player_id).map(|items| items.iter().cloned().collect()).unwrap_or_default();
+        let recaps = inner.death_recaps_by_target.get_mut_or_insert_with(target, VecDeque::new);
+        recaps.push_back(DeathRecap { player_id, at_ms, events });
+        while recaps.len() > DEATH_RECAP_CAPACITY { recaps.pop_front(); }
     }
 
     pub fn main_actor_combat_power(&self) -> Option<u64> {
@@ -793,13 +1091,15 @@ impl DataStorage {
     }
 
     pub fn mark_player_dead(&self, entity_id: u32) -> (bool, Option<String>) {
-        if !self.config.read().unwrap().pvp_mode_on {
+        let mut inner = self.inner.write().unwrap();
+        if inner.mob_id_code_map.contains_key(&entity_id) || !inner.actor_id_name_map.contains_key(&entity_id) || !inner.dead_entities.insert(entity_id) {
             return (false, None);
         }
-
-        let mut inner = self.inner.write().unwrap();
+        let deaths = inner.player_deaths.get_mut_or_insert_with(entity_id, || 0);
+        *deaths = deaths.saturating_add(1);
+        if !self.config.read().unwrap().pvp_mode_on { return (true, None); }
         let Some(victim) = pvp_player_key(&inner, entity_id) else {
-            return (false, None);
+            return (true, None);
         };
         if inner.mob_id_code_map.contains_key(&entity_id)
             || !inner.pvp_dead_players.insert(victim.clone())
@@ -844,6 +1144,7 @@ impl DataStorage {
 
     pub fn mark_player_alive(&self, entity_id: u32) {
         let mut inner = self.inner.write().unwrap();
+        inner.dead_entities.remove(&entity_id);
         if let Some(player) = pvp_player_key(&inner, entity_id) {
             inner.pvp_dead_players.remove(&player);
         }
@@ -893,6 +1194,37 @@ impl DataStorage {
         self.mob_code_name_map.get(&mob_code).cloned()
     }
 
+    /// Replace the scheduled timers for one map after receiving its 0x0191 packet.
+    pub fn replace_field_boss_timers<I>(&self, map_id: u32, timers: I)
+    where
+        I: IntoIterator<Item = (u32, u64)>,
+    {
+        let last_seen_ms = current_timestamp_millis();
+        let mut inner = self.inner.write().unwrap();
+        inner
+            .field_boss_timers
+            .retain(|(existing_map_id, _), _| *existing_map_id != map_id);
+        for (mob_code, spawn_at_ms) in timers {
+            inner
+                .field_boss_timers
+                .insert((map_id, mob_code), (spawn_at_ms, last_seen_ms));
+        }
+    }
+
+    /// Snapshot the timer table for the local service API.
+    pub fn field_boss_timer_snapshot(&self) -> Vec<(u32, u32, u64, u64)> {
+        let inner = self.inner.read().unwrap();
+        let mut timers = inner
+            .field_boss_timers
+            .iter()
+            .map(|(&(map_id, mob_code), &(spawn_at_ms, last_seen_ms))| {
+                (map_id, mob_code, spawn_at_ms, last_seen_ms)
+            })
+            .collect::<Vec<_>>();
+        timers.sort_unstable_by_key(|timer| (timer.2, timer.0, timer.1));
+        timers
+    }
+
     pub fn start_time_by_target_snapshot(&self) -> HashMap<u32, HashMap<u32, f64>> {
         self.inner.read().unwrap().start_time_by_target.clone()
     }
@@ -909,6 +1241,56 @@ impl DataStorage {
         self.inner.read().unwrap().main_actor_id
     }
 
+    /// Small live-service view; reads only the selected target, active buff intervals,
+    /// and the bounded per-skill counters instead of cloning combat histories.
+    pub fn live_combat_assist_snapshot(
+        &self,
+        pinned_target: Option<u32>,
+        now_ms: u64,
+    ) -> (
+        Option<u32>,
+        Option<(u32, Option<u32>, Option<(u32, u32)>, bool)>,
+        Vec<(u32, u32, u32, u64, u64)>,
+        Vec<(u32, u32, u32, u64, u64)>,
+        Vec<(u32, u64, u32)>,
+    ) {
+        let show_possible_boss = self.config.read().unwrap().show_possible_boss;
+        let inner = self.inner.read().unwrap();
+        let self_id = inner.main_actor_id;
+        let target_id = pinned_target.filter(|id| inner.mob_id_code_map.contains_key(id))
+            .or(inner.last_target_by_main_actor);
+        let target = target_id.map(|id| {
+            let mob_code = inner.mob_id_code_map.get(&id).copied();
+            let hp = inner.mob_id_hp_map.get(&id).copied();
+            let is_boss = mob_code.is_some_and(|code| self.boss_code_list.contains(&code)
+                || (show_possible_boss && inner.possible_boss_codes.contains(&code)));
+            (id, mob_code, hp, is_boss)
+        });
+        let active_buffs = |target_id: Option<u32>, actor_filter: Option<u32>| {
+            let mut rows = Vec::new();
+            if let Some(target_id) = target_id {
+                if let Some(actors) = inner.use_buffs_by_target.get(&target_id) {
+                    for (actor_id, skills) in actors {
+                        if actor_filter.is_some_and(|actor| actor != *actor_id) { continue; }
+                        for (skill_code, intervals) in skills {
+                            if let Some(interval) = intervals.iter().rev().find(|entry| entry.end_ms > now_ms) {
+                                rows.push((target_id, *actor_id, *skill_code, interval.start_ms, interval.end_ms));
+                            }
+                        }
+                    }
+                }
+            }
+            rows
+        };
+        let buffs = active_buffs(self_id, None);
+        let debuffs = if self_id.is_some() { active_buffs(target.map(|row| row.0), self_id) } else { Vec::new() };
+        let mut casts: Vec<_> = inner.own_skill_uses.iter()
+            .map(|(skill, (last_ms, count))| (*skill, *last_ms, *count)).collect();
+        casts.sort_by(|a, b| b.1.cmp(&a.1));
+        casts.truncate(60);
+        (self_id, target, buffs, debuffs, casts)
+    }
+
     pub fn main_actor_name(&self) -> Option<String> {
         self.inner.read().unwrap().main_actor_name.clone()
     }
@@ -920,6 +1302,14 @@ impl DataStorage {
     pub fn last_target_by_main_actor(&self) -> Option<u32> {
         self.inner.read().unwrap().last_target_by_main_actor
     }
+}
+
+// only the own-only "01 01" form of 00 8D is counted (processor.rs), so a handful of packets with a clear leader is enough:
+// standing still it comes about once a second, and 20 samples meant ~24 s without "you" in the meter
+fn self_packet_candidate(counts: &HashMap<u32, u32>, total: u32) -> Option<u32> {
+    if total < 5 { return None; }
+    counts.iter().find(|(_, count)| u64::from(**count) * 5 >= u64::from(total) * 4)
+        .map(|(id, _)| *id)
 }
 
 fn infer_specialty_slots(skill_id: u32) -> Vec<u32> {
@@ -1041,7 +1431,8 @@ fn main_actor_changed(current: Option<&str>, next: &str) -> bool {
 
 #[cfg(test)]
 mod main_actor_tests {
-    use super::main_actor_changed;
+    use super::{main_actor_changed, self_packet_candidate};
+    use std::collections::HashMap;
 
     #[test]
     fn first_identification_counts_as_a_change() {
@@ -1058,6 +1449,14 @@ mod main_actor_tests {
     #[test]
     fn switching_character_counts_as_a_change() {
         assert!(main_actor_changed(Some("Helveticaa"), "HiorV11"));
+    }
+
+    #[test]
+    fn self_packet_needs_five_and_eighty_percent() {
+        let counts = HashMap::from([(1, 4), (2, 1)]);
+        assert_eq!(self_packet_candidate(&counts, 4), None);
+        assert_eq!(self_packet_candidate(&counts, 5), Some(1));
+        assert_eq!(self_packet_candidate(&HashMap::from([(1, 3), (2, 2)]), 5), None);
     }
 }
 

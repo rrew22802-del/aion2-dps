@@ -4,9 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { t, setLanguage } from "../../i18n.js";
 import skillsEn from "@/i18n/locales/aion2skills/en.json";
 import skillsKo from "@/i18n/locales/aion2skills/ko.json";
+import skillsRu from "@/i18n/locales/aion2skills/ru.json";
 import serversData from "@/games/aion2/data/servers.json";
 
-const SKILLS = { en: skillsEn, ko: skillsKo };
+const SKILLS = { en: skillsEn, ko: skillsKo, ru: skillsRu };
 let currentSkills = skillsEn;
 
 // ── Server name lookup ──
@@ -26,7 +27,7 @@ const $playerPowerText = document.getElementById("player-power-text");
 
 document.getElementById("close-btn").addEventListener("click", async () => {
   try {
-    await getCurrentWindow().close();
+    await getCurrentWindow().hide();
   } catch (_) {
     /* ignore */
   }
@@ -72,10 +73,10 @@ function fmtPct(n) {
 }
 function fmtDuration(s) {
   if (!s || s <= 0) return "--";
-  if (s < 60) return Math.floor(s) + "s";
+  if (s < 60) return Math.floor(s) + t("dps-detail.secondsShort");
   const m = Math.floor(s / 60),
     sec = Math.floor(s % 60);
-  return m + "m " + String(sec).padStart(2, "0") + "s";
+  return m + t("dps-detail.minutesShort") + " " + String(sec).padStart(2, "0") + t("dps-detail.secondsShort");
 }
 function getClassIcon(c) {
   return c ? "/aion2/class/" + c.toLowerCase() + ".png" : "";
@@ -104,7 +105,7 @@ function resolveSkillId(id) {
 }
 function skillName(id) {
   const k = resolveSkillId(id);
-  return currentSkills[k] || "Skill #" + id;
+  return currentSkills[k] || t("dps-detail.skill") + " #" + id;
 }
 function skillIcon(id) {
   const base = resolveSkillId(id);
@@ -239,7 +240,7 @@ function setMode(m) {
 
 function render() {
   if (!selectedActorId) {
-    $playerName.textContent = "Player";
+    $playerName.textContent = t("dps-detail.player");
     $playerServer.textContent = "";
     $playerPower.style.display = "none";
     $playerIcon.style.display = "none";
@@ -384,7 +385,9 @@ function render() {
   if (skills.length > 0) {
     html += `<div class="skill-table-wrap"><div class="skill-table-scroll"><div class="skill-table">`;
     // Header
-    html += `<div class="skill-header"><span>${t("dps-detail.skill")}</span><span>${t("dps-detail.spec")}</span><span>${t("dps-detail.count")}</span><span>${t("dps-detail.critical")}%</span><span>${t("dps-detail.perfect")}%</span><span>${t("dps-detail.double")}%</span><span>${t("dps-detail.front")}%</span><span>${t("dps-detail.back")}%</span><span>${t("dps-detail.parry")}%</span><span>${t("dps-detail.multi")}%</span><span>${t("dps-detail.multiHitDmg")}</span><span>${t("dps-detail.min")}</span><span>${t("dps-detail.max")}</span><span>${t("dps-detail.avg")}</span><span>${t("dps-detail.total")}</span></div>`;
+    // short column labels where a locale has them (RU words are too long for the fixed grid)
+    const col = (short, full) => { const v = t(`dps-detail.${short}`); return v && v !== `dps-detail.${short}` ? v : t(`dps-detail.${full}`); };
+    html += `<div class="skill-header"><span>${t("dps-detail.skill")}</span><span>${t("dps-detail.spec")}</span><span>${t("dps-detail.count")}</span><span>${col("colCritical", "critical")}%</span><span>${col("colPerfect", "perfect")}%</span><span>${col("colDouble", "double")}%</span><span>${col("colFront", "front")}%</span><span>${col("colBack", "back")}%</span><span>${col("colParry", "parry")}%</span><span>${col("colMulti", "multi")}%</span><span>${col("colMultiHitDmg", "multiHitDmg")}</span><span>${t("dps-detail.min")}</span><span>${t("dps-detail.max")}</span><span>${t("dps-detail.avg")}</span><span>${t("dps-detail.total")}</span></div>`;
     for (const s of skills) {
       const sc = getSpecial(s, "CRITICAL");
       const bk = getSpecial(s, "BACK");
@@ -512,12 +515,16 @@ function render() {
   // Init titlebar + empty text (set before render() replaces the .empty element)
   const $emptyEl = document.querySelector(".empty");
   if ($emptyEl) $emptyEl.textContent = t("dps-detail.empty");
+  document.getElementById("close-btn").title = t("dps-detail.close");
+  document.getElementById("close-btn").setAttribute("aria-label", t("dps-detail.close"));
   $modeBadge.textContent = t("dps-overlay.live");
   $modeBadge.className = "titlebar__mode is-live";
 
   listen("language-changed", (event) => {
     setLanguage(event.payload.language);
     currentSkills = SKILLS[event.payload.language] || skillsEn;
+    document.getElementById("close-btn").title = t("dps-detail.close");
+    document.getElementById("close-btn").setAttribute("aria-label", t("dps-detail.close"));
     render();
   });
 

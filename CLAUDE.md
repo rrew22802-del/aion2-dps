@@ -1,11 +1,13 @@
-# Aether — working notes
+# DBAion2 DPS — working notes
 
-A real-time DPS meter for AION 2, aimed at the global servers. Fork of
-[NOIA2](https://github.com/ZDYoung0519/NOIA2) (GPL-3.0). Rust + Tauri 2 backend,
-React 19 + TypeScript frontend.
+A real-time DPS meter for AION 2, aimed at the global servers. Rebranded from Aether — itself a
+fork of [NOIA2](https://github.com/ZDYoung0519/NOIA2) (GPL-3.0) — for dbaion2.ru; see
+[docs/DBAION2.md](./docs/DBAION2.md) for that rebrand. Rust + Tauri 2 backend, React 19 +
+TypeScript frontend.
 
-Read [FORK.md](./FORK.md) for what diverges from upstream and why. It is the
-authoritative record; this file is the short version.
+Read [FORK.md](./FORK.md) for what Aether itself diverges from NOIA2 on and why — most of the
+architecture notes below still apply verbatim, since the rebrand touched branding, theming, i18n
+and links, not the capture/parsing engine.
 
 ## Commands
 
@@ -92,10 +94,16 @@ runner cannot launch an executable that demands elevation.
   They drifted apart once already and the driver went missing from every install
   while working perfectly for whoever built it. Anything a released build needs
   at runtime belongs in both.
-- **The startup gate is authoritative in Rust, not in the page.** `enter_app`
-  re-runs the checks before showing the main window, and `preflight::passed()`
-  guards `show_main_window`. Any new path that surfaces the main window has to
-  go through it, or it becomes a way around the gate.
+- **There is no startup gate any more (TASK-11).** The main window shows
+  itself immediately; `run_preflight` only feeds `PreflightBanner`, a
+  dismissible banner inside it, not a blocking screen. `enter_app` and
+  `preflight::passed()`/`mark_passed()` are gone -- don't reintroduce a
+  "passed" flag that some new path could be a way around.
+- **`--embedded` is a different launch mode, not a different build.** See
+  `src-tauri/src/embedded.rs` and `docs/DBAION2.md`: the farm tracker starts
+  this same exe with `--embedded [--theme ...] [--lang ...] [--parent-hwnd
+  <n>]`. No tray icon, sidebar or title bar of its own in that mode, and no
+  code shared with the tracker -- the command line is the entire contract.
 - **Tailwind v4 scans `.rs` files too.** A Windows path in a Rust string, like
   `"C:\...\2c40..."`, reads as a CSS hex escape and fails `vite build` with
   `Invalid code point`. Use forward slashes in paths inside Rust sources.

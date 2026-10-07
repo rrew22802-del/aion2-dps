@@ -1,39 +1,24 @@
-//! The startup gate: everything that must be true before Aether can measure.
+//! Everything that must be true before the meter can capture.
 //!
 //! Two ideas drive this module.
 //!
 //! First, a backend that *exists* is not a backend that *works*. Upstream
 //! decided Npcap was present by loading `wpcap.dll`, which keeps succeeding
-//! after the driver service is stopped or the adapter list goes empty -- the
-//! splash would wave the user into an app that can never see a packet. Here the
-//! probe talks to the driver.
+//! after the driver service is stopped or the adapter list goes empty -- a
+//! naive check would wave the user into an app that can never see a packet.
+//! Here the probe talks to the driver.
 //!
 //! Second, not every failure deserves to stop anyone. Capture needs *one*
 //! backend, not both, so WinDivert missing while Npcap works is a footnote, not
-//! an alarm. [`Weight`] carries that distinction to the UI so the gate holds for
-//! real problems and stays quiet about the rest.
-
-use std::sync::atomic::{AtomicBool, Ordering};
+//! an alarm. [`Weight`] carries that distinction to the UI, which shows these
+//! checks as a banner in the main window (TASK-11) rather than a separate gate
+//! that blocks entry -- `run_preflight` is read-only now, so nothing holds a
+//! "passed" flag any more.
 
 use serde::Serialize;
 
 use crate::dps_meter::capture::capturer;
 use crate::dps_meter::capture::windivert_capturer;
-
-/// Set once the gate has opened, and never cleared.
-///
-/// A gate that only the splash screen honours is not a gate: the tray icon and
-/// a second launch both surface the main window on their own. Everything that
-/// can put the main window on screen consults this instead.
-static PASSED: AtomicBool = AtomicBool::new(false);
-
-pub fn passed() -> bool {
-    PASSED.load(Ordering::Relaxed)
-}
-
-pub fn mark_passed() {
-    PASSED.store(true, Ordering::Relaxed);
-}
 
 /// Which check a row reports on. The frontend keys its icons and fix buttons
 /// off this rather than off the label, so labels stay free to be reworded.

@@ -26,6 +26,14 @@ pub struct TcpReassembler {
 }
 
 impl TcpReassembler {
+    pub fn clear(&mut self) {
+        self.next_sequence = None;
+        self.pending.clear();
+        self.held_bytes = 0;
+        self.retransmits = 0;
+        self.gap_skips = 0;
+    }
+
     pub fn feed(&mut self, sequence: u32, data: Vec<u8>) -> Vec<Vec<u8>> {
         if data.is_empty() {
             return Vec::new();

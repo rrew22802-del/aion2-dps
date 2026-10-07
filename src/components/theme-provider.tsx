@@ -6,6 +6,13 @@ type ThemeProviderProps = {
   children: React.ReactNode;
   defaultTheme?: Theme;
   storageKey?: string;
+  /**
+   * Overrides the stored/system theme without ever reading or writing
+   * `storageKey` -- for an `--embedded` launch (TASK-11), where the farm
+   * tracker's own `--theme` flag decides, and must not overwrite whatever
+   * theme this app remembers from being run standalone.
+   */
+  forcedTheme?: "light" | "dark";
 };
 
 type ThemeProviderState = {
@@ -24,17 +31,19 @@ export function ThemeProvider({
   children,
   defaultTheme = "system",
   storageKey = "vite-ui-theme",
+  forcedTheme,
   ...props
 }: ThemeProviderProps) {
-  const [theme, setTheme] = useState<Theme>(
+  const [theme, setThemeState] = useState<Theme>(
     () => (localStorage.getItem(storageKey) as Theme) || defaultTheme
   );
+  const effectiveTheme = forcedTheme ?? theme;
 
   useEffect(() => {
     const root = window.document.documentElement;
     root.classList.remove("light", "dark");
 
-    if (theme === "system") {
+    if (effectiveTheme === "system") {
       const systemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches
         ? "dark"
         : "light";
@@ -42,26 +51,29 @@ export function ThemeProvider({
       return;
     }
 
-    root.classList.add(theme);
-  }, [theme]);
+    root.classList.add(effectiveTheme);
+  }, [effectiveTheme]);
 
-  // Listen for localStorage changes to sync theme across windows
+  // Listen for localStorage changes to sync theme across windows. Irrelevant
+  // when forced: there is nothing stored to have changed.
   useEffect(() => {
+    if (forcedTheme) return;
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === storageKey && e.newValue) {
-        setTheme(e.newValue as Theme);
+        setThemeState(e.newValue as Theme);
       }
     };
 
     window.addEventListener("storage", handleStorageChange);
     return () => window.removeEventListener("storage", handleStorageChange);
-  }, [storageKey]);
+  }, [storageKey, forcedTheme]);
 
   const value = {
-    theme,
+    theme: effectiveTheme,
     setTheme: (newTheme: Theme) => {
+      if (forcedTheme) return;
       localStorage.setItem(storageKey, newTheme);
-      setTheme(newTheme);
+      setThemeState(newTheme);
     },
   };
 

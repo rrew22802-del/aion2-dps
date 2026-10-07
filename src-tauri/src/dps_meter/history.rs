@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::dps_meter::models::combat::{
-    BuffSummary, CombatInfos, CombatSnapshot, PlayerOverviewStat, SkillStats, TargetInfo,
+    BossCast, DeathRecap, TakenSourceStat, BuffInterval, BuffSummary, CombatEvent, CombatInfos, CombatSnapshot, PlayerOverviewStat, SkillStats, TargetInfo,
 };
 
 const MAGIC: &[u8; 4] = b"DPSH";
@@ -29,8 +29,22 @@ pub struct HistoryRecord {
     pub player_skill_stats: HashMap<u32, HashMap<u32, SkillStats>>,
     pub player_stats: HashMap<u32, PlayerOverviewStat>,
     #[serde(default)]
+    pub summon_owner_ids: Option<HashSet<u32>>,
+    #[serde(default)]
+    pub party_member_ids: Option<HashSet<u32>>,
+    #[serde(default)]
     pub use_buffs_by_target: HashMap<u32, Vec<BuffSummary>>,
     pub created_at: u64,
+    #[serde(default)]
+    pub combat_events: Vec<CombatEvent>,
+    #[serde(default)]
+    pub buff_intervals: HashMap<u32, HashMap<u32, HashMap<u32, Vec<BuffInterval>>>>,
+    #[serde(default)]
+    pub damage_taken: HashMap<u32, Vec<TakenSourceStat>>,
+    #[serde(default)]
+    pub death_recaps: Vec<DeathRecap>,
+    #[serde(default)]
+    pub boss_casts: Vec<BossCast>,
 }
 
 // =============================================================================
@@ -102,15 +116,15 @@ impl HistoryStore {
 
     /// Persist current snapshot as per-target history records, then clear.
     /// Returns what was saved, for the personal bests to learn from.
-    pub fn save_and_clear(&self, snapshot: CombatSnapshot) -> Vec<HistoryRecord> {
-        let records = Self::extract_records(snapshot);
+    pub fn save_and_clear(&self, snapshot: CombatSnapshot, summon_owner_ids: HashSet<u32>, party_member_ids: HashSet<u32>) -> Vec<HistoryRecord> {
+        let records = Self::extract_records(snapshot, summon_owner_ids, party_member_ids);
         if !records.is_empty() {
             self.push(records.clone());
         }
         records
     }
 
-    fn extract_records(snapshot: CombatSnapshot) -> Vec<HistoryRecord> {
+    fn extract_records(snapshot: CombatSnapshot, summon_owner_ids: HashSet<u32>, party_member_ids: HashSet<u32>) -> Vec<HistoryRecord> {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -136,6 +150,8 @@ impl HistoryStore {
 
                 let relevant_buff_targets: HashSet<u32> = std::iter::once(target_id)
                     .chain(player_stats.keys().copied())
+                    .chain(snapshot.damage_taken_by_target.get(&target_id).into_iter().flat_map(|players| players.keys().copied()))
+                    .chain(snapshot.death_recaps_by_target.get(&target_id).into_iter().flat_map(|deaths| deaths.iter().map(|death| death.player_id)))
                     .collect();
                 let use_buffs_by_target = snapshot
                     .use_buffs_by_target
@@ -159,16 +175,31 @@ impl HistoryStore {
                     ..snapshot.combat_infos.clone()
                 };
 
+                let started_ms = target_info
+                    .as_ref()
+                    .and_then(|info| info.target_start_time.values().copied().reduce(f64::min))
+                    .map(|seconds| (seconds * 1000.0) as u64)
+                    .unwrap_or(now_ms);
+
                 Some(HistoryRecord {
-                    id: format!("{}-{}", target_id, now_ms),
+                    id: format!("{}-{}", target_id, started_ms),
                     target_id,
                     total_damage,
                     target_info,
                     combat_infos,
                     player_stats,
+                    summon_owner_ids: Some(summon_owner_ids.clone()),
+                    party_member_ids: Some(party_member_ids.clone()),
                     player_skill_stats: skill_stats,
                     use_buffs_by_target,
                     created_at: now_ms,
+                    combat_events: snapshot.combat_events.iter()
+                        .filter(|event| event.target_id == target_id && event.at_ms >= started_ms && event.at_ms <= started_ms.saturating_add(1_200_000))
+                        .take(25_000).cloned().collect(),
+                    buff_intervals: snapshot.buff_intervals.iter().filter(|(buff_target, _)| relevant_buff_targets.contains(buff_target)).map(|(target, actors)| (*target, actors.clone())).collect(),
+                    damage_taken: snapshot.damage_taken_by_target.get(&target_id).cloned().unwrap_or_default(),
+                    death_recaps: snapshot.death_recaps_by_target.get(&target_id).cloned().unwrap_or_default(),
+                    boss_casts: snapshot.boss_casts_by_target.get(&target_id).cloned().unwrap_or_default(),
                 })
             })
             .collect()

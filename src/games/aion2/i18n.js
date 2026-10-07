@@ -1,7 +1,8 @@
 import en from "@/i18n/locales/aion2overlay/en.json";
 import ko from "@/i18n/locales/aion2overlay/ko.json";
+import ru from "@/i18n/locales/aion2overlay/ru.json";
 
-const LOCALES = { en, ko };
+const LOCALES = { en, ko, ru };
 let lang = "en";
 
 export function t(key, params) {

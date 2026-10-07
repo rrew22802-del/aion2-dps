@@ -205,6 +205,44 @@ impl DpsMeter {
         self.data_storage.main_actor_name()
     }
 
+    pub fn live_combat_assist_snapshot(
+        &self,
+        pinned_target: Option<u32>,
+        now_ms: u64,
+    ) -> (
+        Option<u32>,
+        Option<(u32, Option<u32>, Option<(u32, u32)>, bool)>,
+        Vec<(u32, u32, u32, u64, u64)>,
+        Vec<(u32, u32, u32, u64, u64)>,
+        Vec<(u32, u64, u32)>,
+    ) {
+        self.data_storage.live_combat_assist_snapshot(pinned_target, now_ms)
+    }
+
+    pub fn ping_ms(&self) -> Option<f64> {
+        self.ping_tracker.current_ping_ms()
+    }
+
+    pub fn summon_owner_ids(&self) -> std::collections::HashSet<u32> {
+        self.data_storage.summon_owner_snapshot().into_values().collect()
+    }
+
+    pub fn party_snapshot(&self) -> crate::dps_meter::storage::data_storage::PartySnapshot {
+        self.data_storage.party_snapshot()
+    }
+
+    pub fn nearby_snapshot(&self) -> (Option<u32>, Option<crate::dps_meter::storage::nearby::Position>, Vec<crate::dps_meter::storage::nearby::NearbyPlayer>) {
+        self.data_storage.nearby_snapshot()
+    }
+
+    pub fn field_boss_timer_snapshot(&self) -> Vec<(u32, u32, u64, u64)> {
+        self.data_storage.field_boss_timer_snapshot()
+    }
+
+    pub fn mob_name(&self, mob_code: u32) -> Option<String> {
+        self.data_storage.mob_name(mob_code)
+    }
+
     /// Whether an automatic recording is running right now.
     pub fn is_auto_recording(&self) -> bool {
         self.auto_record.lock().unwrap().active_since.is_some()
@@ -365,7 +403,11 @@ impl DpsMeter {
         if snapshot.total_damage == 0 {
             return;
         }
-        let saved = self.history.save_and_clear(snapshot);
+        let saved = self.history.save_and_clear(
+            snapshot,
+            self.summon_owner_ids(),
+            self.data_storage.party_snapshot().member_ids,
+        );
         let _ = self.app.emit("history-updated", ());
         if self.personal_bests.record_and_save(&saved) {
             let _ = self.app.emit("personal-bests-updated", ());
@@ -443,6 +485,11 @@ impl DpsMeter {
             last_target_all_players_overview_stats: Vec::new(),
             main_actor_received_player_overview_stats: Vec::new(),
             main_actor_dealt_player_overview_stats: Vec::new(),
+            combat_events: Vec::new(),
+            buff_intervals: HashMap::new(),
+            damage_taken_by_target: HashMap::new(),
+            death_recaps_by_target: HashMap::new(),
+            boss_casts_by_target: HashMap::new(),
         };
         let _ = self.app.emit("dps-snapshot", empty);
     }
@@ -643,8 +690,21 @@ impl DpsMeter {
             );
 
             while memory_snapshot_running.load(Ordering::SeqCst) {
-                let removed_ports = dispatcher
-                    .cleanup_stale_assemblers(Duration::from_secs(STALE_ASSEMBLER_IDLE_SECS));
+                let (cap_device, cap_port) = match *active_capture_backend.lock().unwrap() {
+                    Some(CaptureBackend::WinDivert) => (
+                        windivert_capturer.target_device(),
+                        windivert_capturer.target_port(),
+                    ),
+                    Some(CaptureBackend::Npcap) => (
+                        pcap_capturer.target_device(),
+                        pcap_capturer.target_port(),
+                    ),
+                    None => (None, None),
+                };
+                let removed_ports = dispatcher.cleanup_stale_assemblers(
+                    Duration::from_secs(STALE_ASSEMBLER_IDLE_SECS),
+                    cap_port.as_deref(),
+                );
                 if !removed_ports.is_empty() {
                     logger.info(format!(
                         "cleaned stale assembler ports: {}",
@@ -661,17 +721,6 @@ impl DpsMeter {
                     &logger,
                     auto_record_enabled,
                 );
-
-                let (cap_device, cap_port) = match *active_capture_backend.lock().unwrap() {
-                    Some(CaptureBackend::WinDivert) => (
-                        windivert_capturer.target_device(),
-                        windivert_capturer.target_port(),
-                    ),
-                    Some(CaptureBackend::Npcap) => {
-                        (pcap_capturer.target_device(), pcap_capturer.target_port())
-                    }
-                    None => (None, None),
-                };
 
                 if let Some(snapshot) = build_memory_snapshot(
                     &mut system,

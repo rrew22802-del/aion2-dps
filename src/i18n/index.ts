@@ -3,6 +3,7 @@ import { initReactI18next } from "react-i18next";
 import LanguageDetector from "i18next-browser-languagedetector";
 import en from "./locales/en.json";
 import ko from "./locales/ko.json";
+import ru from "./locales/ru.json";
 
 i18n
   .use(LanguageDetector)
@@ -11,13 +12,15 @@ i18n
     resources: {
       en: { ui: en },
       ko: { ui: ko },
+      ru: { ui: ru },
     },
     defaultNS: "ui",
     ns: ["ui"],
     fallbackLng: "en",
     // Chinese was dropped: this build targets the global service, and every
-    // remaining string is authored in English.
-    supportedLngs: ["en", "ko"],
+    // remaining string is authored in English. Russian was added for
+    // dbaion2.ru's own DBAion2 DPS fork.
+    supportedLngs: ["en", "ko", "ru"],
     interpolation: {
       escapeValue: false,
     },

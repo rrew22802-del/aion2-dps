@@ -9,6 +9,39 @@ lives in the [NOIA2 repository](https://github.com/ZDYoung0519/NOIA2).
      and some players still update from there: so no hard wraps and no bold in
      2.0.0 and later. From 2.0.0 on the dialog renders Markdown. -->
 
+## [2.8.0]
+
+- Adds fight damage-taken totals and per-source breakdowns, bounded death recaps, per-player buff uptime, and observed NPC skill timelines to the local service API.
+- Adds nullable `mapId` to history rows; no map identity is reported until the packet data can establish it reliably.
+- Raises bounded service, Cargo, Tauri, and app version to 2.8.0.
+
+## [2.7.0]
+
+- Adds `GET /v1/nearby` with a bounded 120-second table of players observed via `45 36`, including known name, class, optional server/CP, and attributed damage.
+- Corrects the earlier `45 36` party-only interpretation: it is a visible-player update. Documents verified and unknown fields; `45 37` is no longer treated as a confirmed party leave or nearby despawn.
+- Updates the app, Cargo, and Tauri version to 2.7.0.
+
+## [2.6.2]
+
+- Game flow liveness now follows server-to-client protocol packets. After eight quiet seconds the capture scans all adapters again and can switch to a replacement flow.
+- Tracks concurrent game server flows independently after three magic packets, while rejecting unknown flows before TCP and stream assembly.
+- Keeps the active target assembler across quiet periods and clears its partial buffers; dispatcher packet diagnostics now use DEBUG.
+
+## [2.6.1]
+
+- Added party roster tracking from member-info packets, `inParty` on player summaries, and `GET /v1/party` for tracker filters.
+- Documented party packet observations, API behavior and parser limitations.
+
+## [2.6.0]
+
+- Game capture scans all usable adapters together, recognizes VPNs, tunnels, boosters and loopback proxies, and quickly rescans after a flow goes idle.
+- Added per player healing totals and HPS, combat power and death counts to fight data, plus `/v1/fights/{fightId}/timeline` for second by second damage, casts and available buff intervals.
+- Documented the packet evidence and limitations for combat power and deaths.
+
+## [2.5.0]
+
+- Added the live `/v1/live` service endpoint for current buffs, self-applied effects, own skill hit cooldown data, and target health.
+
 ## [2.4.0]
 
 Safer next to anti-cheat, and a straight answer about fullscreen games.

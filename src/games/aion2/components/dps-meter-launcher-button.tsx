@@ -161,7 +161,7 @@ export function DpsMeterLauncherCard() {
 
         if (autoCloseMain) {
           await invoke("show_system_notification", {
-            title: "Aether",
+            title: "DBAion2 DPS",
             body: t("aion2Home.meterRunningNotification"),
           });
           const appWindow = getCurrentWebviewWindow();

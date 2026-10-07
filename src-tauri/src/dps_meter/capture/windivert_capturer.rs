@@ -359,10 +359,9 @@ fn normalized_connection(src_port: u16, dst_port: u16) -> (u16, u16) {
     }
 }
 
+// at the start only, as in capturer.rs: anywhere in a payload, encrypted VPN traffic matched by chance
 fn contains_magic(payload: &[u8]) -> bool {
-    payload
-        .windows(MAGIC_PATTERN.len())
-        .any(|window| window == MAGIC_PATTERN)
+    payload.starts_with(&MAGIC_PATTERN)
 }
 
 fn current_timestamp_seconds() -> f64 {

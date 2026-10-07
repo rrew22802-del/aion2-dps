@@ -20,7 +20,7 @@ jobs:
           # - platform: "ubuntu-22.04"
           #   args: ""
           - platform: "windows-latest"
-            args: "--bundles nsis,updater"
+            args: "--bundles nsis"
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -51,19 +51,6 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify updater configuration
-        shell: bash
-        run: |
-          # The public key and endpoint are committed, so nothing is substituted
-          # here any more. This only guards against them going missing.
-          if grep -q "__TAURI_UPDATER" src-tauri/tauri.conf.json; then
-            echo "::error::Updater placeholder still present in tauri.conf.json"
-            exit 1
-          fi
-          echo "Updater endpoint:"
-          grep -A2 '"endpoints"' src-tauri/tauri.conf.json
-
-
       - name: Get release notes
         id: notes
         shell: bash
@@ -86,11 +73,9 @@ jobs:
         id: tauri-action
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
-          releaseName: "Aether v__VERSION__"
+          releaseName: "DBAion2 DPS v__VERSION__"
           releaseBody: ${{ steps.notes.outputs.notes }}
           releaseDraft: false
           prerelease: false

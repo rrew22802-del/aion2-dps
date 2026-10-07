@@ -334,7 +334,7 @@ function setNested(
 // Hook
 // =============================================================================
 
-export function useSettings() {
+export function useSettings(forcedLanguage?: string) {
   const [config, setConfig] = useState<AppConfig>(loadConfig);
   const configRef = useRef(config);
   configRef.current = config;
@@ -364,11 +364,11 @@ export function useSettings() {
   // Push auto-hide setting to Rust
   const syncLanguage = useCallback(async (cfg: AppConfig) => {
     try {
-      await invoke("set_language", { language: cfg.app.language });
+      await invoke("set_language", { language: forcedLanguage ?? cfg.app.language });
     } catch (e) {
       console.error("[useSettings] syncLanguage failed:", e);
     }
-  }, []);
+  }, [forcedLanguage]);
 
   const syncAutoHide = useCallback(async (cfg: AppConfig) => {
     try {

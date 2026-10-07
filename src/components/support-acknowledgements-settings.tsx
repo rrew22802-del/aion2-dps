@@ -16,7 +16,7 @@ type CreditItem = {
 };
 
 /**
- * Aether is a fork, and this page says so plainly.
+ * DBAion2 DPS is a fork of a fork, and this page says so plainly.
  *
  * Upstream's own page collected donations and community group numbers; those
  * belong to that project and its author, not to this fork, so they are not
@@ -25,7 +25,7 @@ type CreditItem = {
 const UPSTREAM: CreditItem = {
   name: "ZDYoung0519/NOIA2",
   description:
-    "Aether is a fork of NOIA2 by zdyoung: the capture pipeline, the packet parsers, the overlay, and the game-data catalogues all come from that project.",
+    "NOIA2 by zdyoung, forked by Aether: the capture pipeline, the packet parsers, the overlay, and the game-data catalogues all come from that project.",
   href: "https://github.com/ZDYoung0519/NOIA2",
   avatarSrc: "https://avatars.githubusercontent.com/u/60741049?s=80&v=4",
   avatarFallback: "NO",
@@ -64,21 +64,27 @@ const ARTWORK_CREDITS: CreditItem[] = [
   {
     name: "Kuroukihime/AIon2-Dps-Meter",
     description:
-      "The English names of monsters, bosses, and the Fighter's skills, and the server codes. GPL-3.0, like Aether.",
+      "The English names of monsters, bosses, and the Fighter's skills, and the server codes. GPL-3.0, like this project.",
     href: "https://github.com/Kuroukihime/AIon2-Dps-Meter",
     avatarFallback: "KU",
     badge: "Game data",
   },
-  {
-    name: "Dune by R",
-    description:
-      "The animated background and its still frame. Motion design by R, published on Vimeo.",
-    href: "https://vimeo.com/theraa",
-    avatarSrc: "/aion2/credits/dune.webp",
-    avatarFallback: "R",
-    badge: "Background",
-  },
 ];
+
+/**
+ * This build's own upstream: DBAion2 DPS is a rebrand of Aether, itself a
+ * fork of NOIA2 (see UPSTREAM above). Aether's animated "Dune" background is
+ * not reproduced here — it was not GPL-licensed — so there is nothing to
+ * credit for it.
+ */
+const FORK_CREDIT: CreditItem = {
+  name: "Helveticxa/Aether-Aion2-DPS-meter-Global",
+  description:
+    "DBAion2 DPS is a rebrand of Aether: the capture pipeline, packet parsers and overlay come from that project's own fork of NOIA2.",
+  href: "https://github.com/Helveticxa/Aether-Aion2-DPS-meter-Global",
+  avatarFallback: "AE",
+  badge: "This build's base",
+};
 
 function openExternalLink(href: string) {
   void openUrl(href);
@@ -113,14 +119,15 @@ export function SupportAcknowledgementsSettings() {
     <div className="flex flex-col gap-8">
       <SettingsSectionHeader
         title="Credits"
-        description="Aether stands on other people's work. This page records whose."
+        description="DBAion2 DPS stands on other people's work. This page records whose."
       />
 
       <SettingsGroup title="Built on">
+        <CreditRow item={FORK_CREDIT} />
         <CreditRow item={UPSTREAM} />
         <div className="text-muted-foreground px-5 pb-5 text-xs leading-5">
-          Both projects are licensed GPL-3.0-only. If Aether is useful to you, consider supporting
-          upstream directly through the links on the NOIA2 repository.
+          All three projects are licensed GPL-3.0-only. If this app is useful to you, consider
+          supporting Aether and NOIA2 directly through the links on their own repositories.
         </div>
       </SettingsGroup>
 

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::dps_meter::capture::parser::context::ParserContext;
+use crate::dps_meter::capture::parser::field_boss_timer;
 use crate::dps_meter::capture::parser::nickname;
 use crate::dps_meter::capture::parser::utils::read_varint;
 use crate::dps_meter::config::SharedDpsMeterConfig;
@@ -13,6 +14,8 @@ use crate::plugins::logger::AppLogger;
 const KNOWN_PACKET_HEADERS: &[(u8, u8)] = &[
     (0x33, 0x36),
     (0x45, 0x36),
+    (0x45, 0x37),
+    (0x45, 0x38),
     (0x56, 0x36),
     (0x41, 0x36),
     (0x04, 0x38),
@@ -21,8 +24,7 @@ const KNOWN_PACKET_HEADERS: &[(u8, u8)] = &[
     (0x2B, 0x38),
     (0x04, 0x8D),
     (0x00, 0x8D),
-    // Field boss timers. No longer parsed since 2.2.0, but still a known
-    // opcode: it keeps the stall resync and the census treating it as ours.
+    // Field boss timers are parsed in full mode and remain known to stall resync/census.
     (0x01, 0x91),
     (0xFF, 0xFF),
 ];
@@ -392,6 +394,9 @@ impl StreamProcessor {
                 (0x45, 0x36) => {
                     nickname::parse_other(&self.parser_context(), payload, is_compressed_bundle)
                 }
+                (0x45, 0x37) | (0x45, 0x38) => {
+                    nickname::parse_party_action(&self.parser_context(), payload)
+                }
                 (0x56, 0x36) => nickname::parse_main_combat_power(
                     &self.parser_context(),
                     payload,
@@ -408,7 +413,33 @@ impl StreamProcessor {
                     self.parse_buff_packet(payload, is_compressed_bundle)
                 }
                 (0x04, 0x8D) => self.parse_summon_packet_048d(payload, is_compressed_bundle),
-                (0x00, 0x8D) => self.parse_remain_hp_packet(payload, is_compressed_bundle),
+                (0x00, 0x8D) => {
+                    // only the "01 01" form right after the entity is about our own character (HP updates of mobs and other
+                    // players use "02 01"); counting every 00 8D kept our share under 60 % in fights, so late attach never found us
+                    let actor = read_varint(payload, 2);
+                    let at = 2 + actor.length as usize;
+                    let own_form = actor.is_valid() && actor.value > 0 && payload.get(at) == Some(&1) && payload.get(at + 1) == Some(&1);
+                    let before = self.data_storage.main_actor_id();
+                    if own_form {
+                        self.data_storage.observe_self_packet(actor.value as u32);
+                    }
+                    // diagnostics while we still do not know our character: how many 00 8D arrive, how many in the own form
+                    if before.is_none() {
+                        use std::sync::atomic::{AtomicU32, Ordering};
+                        static SEEN: AtomicU32 = AtomicU32::new(0);
+                        static OWN: AtomicU32 = AtomicU32::new(0);
+                        let seen = SEEN.fetch_add(1, Ordering::Relaxed) + 1;
+                        let own = if own_form { OWN.fetch_add(1, Ordering::Relaxed) + 1 } else { OWN.load(Ordering::Relaxed) };
+                        if let Some(found) = self.data_storage.main_actor_id() {
+                            self.logger.info(format!("[{}] main actor inferred from 00 8D actor={found} after {seen} packets ({own} own-form)", self.port));
+                        } else if seen % 50 == 0 {
+                            self.logger.info(format!("[{}] self fallback waiting: 00 8D seen={seen} own-form={own} last actor={} bytes={:02x?}",
+                                self.port, actor.value, &payload[..payload.len().min(12)]));
+                        }
+                    }
+                    self.parse_remain_hp_packet(payload, is_compressed_bundle)
+                }
+                (0x01, 0x91) => field_boss_timer::parse_packet(&self.parser_context(), payload),
                 _ => false,
             },
             ProcessorMode::NicknameOnly => match (payload[0], payload[1]) {
@@ -417,6 +448,9 @@ impl StreamProcessor {
                 }
                 (0x45, 0x36) => {
                     nickname::parse_other(&self.parser_context(), payload, is_compressed_bundle)
+                }
+                (0x45, 0x37) | (0x45, 0x38) => {
+                    nickname::parse_party_action(&self.parser_context(), payload)
                 }
                 (0x56, 0x36) => nickname::parse_main_combat_power(
                     &self.parser_context(),

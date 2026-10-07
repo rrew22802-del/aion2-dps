@@ -117,6 +117,10 @@ pub struct ActorInfo {
     #[serde(default)]
     pub combat_power: Option<u64>,
     pub actor_skill_spec: HashMap<u32, Vec<u32>>,
+    #[serde(default)]
+    pub heal_total: u64,
+    #[serde(default)]
+    pub deaths: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +166,62 @@ pub struct PlayerOverviewStat {
     pub dps: f64,
     pub damage_share: f64,
     pub damage_contribution: f64,
+    #[serde(default)]
+    pub heal_total: u64,
+    #[serde(default)]
+    pub hps: f64,
+    #[serde(default)]
+    pub deaths: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CombatEvent {
+    pub actor_id: u32,
+    pub target_id: u32,
+    pub skill_code: u32,
+    pub damage: u64,
+    pub is_crit: bool,
+    pub at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakenSourceStat {
+    pub source_id: u32,
+    pub npc_id: Option<u32>,
+    pub source_name: Option<String>,
+    pub skill_code: u32,
+    pub damage: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecapEvent {
+    pub kind: String,
+    pub source_id: u32,
+    pub source_name: Option<String>,
+    pub skill_code: u32,
+    pub amount: u64,
+    pub crit: bool,
+    pub at_ms: u64,
+    pub hp_after: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeathRecap {
+    pub player_id: u32,
+    pub at_ms: u64,
+    pub events: Vec<RecapEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BossCast {
+    pub npc_id: u32,
+    pub skill: u32,
+    pub at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,4 +257,14 @@ pub struct CombatSnapshot {
     pub main_actor_received_player_overview_stats: Vec<PlayerOverviewStat>,
     #[serde(default)]
     pub main_actor_dealt_player_overview_stats: Vec<PvpDamageOverviewStat>,
+    #[serde(default, skip_serializing)]
+    pub combat_events: Vec<CombatEvent>,
+    #[serde(default, skip_serializing)]
+    pub buff_intervals: HashMap<u32, HashMap<u32, HashMap<u32, Vec<BuffInterval>>>>,
+    #[serde(default)]
+    pub damage_taken_by_target: HashMap<u32, HashMap<u32, Vec<TakenSourceStat>>>,
+    #[serde(default)]
+    pub death_recaps_by_target: HashMap<u32, Vec<DeathRecap>>,
+    #[serde(default)]
+    pub boss_casts_by_target: HashMap<u32, Vec<BossCast>>,
 }

@@ -69,7 +69,13 @@ struct PcapPkthdr {
 }
 
 const PCAP_IF_LOOPBACK: c_uint = 0x0000_0001;
+const PCAP_IF_CONNECTION_STATUS: c_uint = 0x0030;
+const PCAP_IF_CONNECTION_STATUS_DISCONNECTED: c_uint = 0x0020;
 const MAGIC_PATTERN: [u8; 3] = [0x0E, 0x00, 0x36];
+/// A flow counts as the game only after this many packets *start* with the magic within one detection window.
+/// The game puts it at offset 0 of nearly every server packet (~20/s); matching it anywhere in a payload let
+/// encrypted VPN traffic (xray/booster tunnels, 1 hit per ~12k packets) be taken for the game (owner log 05.10).
+const MAGIC_MIN_HITS: u32 = 3;
 
 #[derive(Clone)]
 struct DeviceInfo {
@@ -95,10 +101,13 @@ impl DeviceInfo {
         self.is_loopback
             || name.contains("loopback")
             || label.contains("loopback")
-            || label.contains("tap-windows")
-            || label.contains("tap")
-            || label.contains("wintun")
-            || label.contains("wireguard")
+            || ["tunnel", "happ", "xray", "sing", "v2ray", "clash", "wintun", "wireguard", "tap", "openvpn", "outline", "exitlag", "gearup", "noping", "lagofast", "mudfish", "radmin", "zerotier", "hamachi"]
+                .iter()
+                .any(|needle| label.contains(needle) || name.contains(needle))
+    }
+
+    fn priority_label(&self) -> &'static str {
+        if self.is_loopback { "loopback" } else if self.is_virtual() { "tunnel-or-virtual" } else { "physical" }
     }
 }
 
@@ -185,11 +194,24 @@ impl NpcapLib {
                     .to_string()
             };
 
+            let is_loopback = (device.flags & PCAP_IF_LOOPBACK) != 0;
+            let has_addresses = !device.addresses.is_null();
+            let connection_status = device.flags & PCAP_IF_CONNECTION_STATUS;
+            let status_known = matches!(connection_status, 0x0010 | PCAP_IF_CONNECTION_STATUS_DISCONNECTED);
+            let disconnected = status_known && connection_status == PCAP_IF_CONNECTION_STATUS_DISCONNECTED;
+            let name_lower = name.to_ascii_lowercase();
+            let desc_lower = description.to_ascii_lowercase();
+            let special = is_loopback || ["tunnel", "happ", "xray", "sing", "v2ray", "clash", "wintun", "wireguard", "tap", "openvpn", "outline", "exitlag", "gearup", "noping", "lagofast", "mudfish", "radmin", "zerotier", "hamachi"]
+                .iter().any(|needle| name_lower.contains(needle) || desc_lower.contains(needle));
+            if disconnected || (!is_loopback && !has_addresses && !special) {
+                current = device.next;
+                continue;
+            }
             devices.push(DeviceInfo {
                 name,
                 description,
-                has_addresses: !device.addresses.is_null(),
-                is_loopback: (device.flags & PCAP_IF_LOOPBACK) != 0,
+                has_addresses,
+                is_loopback,
             });
 
             current = device.next;
@@ -234,9 +256,10 @@ pub struct PcapCapturer {
     logger: Arc<AppLogger>,
     running: Arc<AtomicBool>,
     detector_thread: Arc<Mutex<Option<JoinHandle<()>>>>,
-    capture_threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    capture_threads: Arc<Mutex<Vec<(Arc<AtomicBool>, JoinHandle<()>)>>>,
     target_device: Arc<RwLock<Option<String>>>,
     target_port: Arc<RwLock<Option<String>>>,
+    last_target_packet: Arc<Mutex<Option<Instant>>>,
     detection_interval: Duration,
     detection_timeout: Duration,
 }
@@ -251,8 +274,9 @@ impl PcapCapturer {
             capture_threads: Arc::new(Mutex::new(Vec::new())),
             target_device: Arc::new(RwLock::new(None)),
             target_port: Arc::new(RwLock::new(None)),
-            detection_interval: Duration::from_secs(20),
-            detection_timeout: Duration::from_secs(1),
+            last_target_packet: Arc::new(Mutex::new(None)),
+            detection_interval: Duration::from_secs(1),
+            detection_timeout: Duration::from_secs(3),
         }
     }
 
@@ -267,6 +291,7 @@ impl PcapCapturer {
         let capture_threads = Arc::clone(&self.capture_threads);
         let target_device = Arc::clone(&self.target_device);
         let target_port = Arc::clone(&self.target_port);
+        let last_target_packet = Arc::clone(&self.last_target_packet);
         let detection_interval = self.detection_interval;
         let detection_timeout = self.detection_timeout;
 
@@ -283,6 +308,17 @@ impl PcapCapturer {
             let mut last_detected_target = String::new();
 
             while running.load(Ordering::SeqCst) {
+                if let Some(active_device) = target_device.read().unwrap().clone() {
+                    sleep_while_running(&running, Duration::from_secs(1));
+                    if !should_rescan(*last_target_packet.lock().unwrap(), Instant::now()) {
+                        continue;
+                    }
+                    logger.info(format!("capture target stale: device={} flow={} idle_for>=8s; rescanning", active_device, target_port.read().unwrap().as_deref().unwrap_or("--")));
+                    *target_device.write().unwrap() = None;
+                    *target_port.write().unwrap() = None;
+                    *last_target_packet.lock().unwrap() = None;
+                    stop_capture_threads(&capture_threads);
+                }
                 // 1. find magic devices
                 let devices = match npcap.find_all_devices() {
                     Ok(devices) => devices,
@@ -301,7 +337,7 @@ impl PcapCapturer {
                     } else {
                         for device_line in &devices {
                             logger.info(format!(
-                                "capture device: {} | desc={} | has_addresses={} | loopback={} | virtual={}",
+                                "capture device: {} | desc={} | has_addresses={} | loopback={} | virtual={} | priority={}",
                                 device_line.name,
                                 if device_line.description.is_empty() {
                                     "--"
@@ -310,28 +346,26 @@ impl PcapCapturer {
                                 },
                                 device_line.has_addresses,
                                 device_line.is_loopback,
-                                device_line.is_virtual()
+                                device_line.is_virtual(),
+                                device_line.priority_label()
                             ));
                         }
                     }
                     last_device_inventory = inventory;
                 }
-                let mut detected_target: Option<CaptureTarget> = None;
-
-                for device in devices {
-                    if let Some(target_port_value) = inspect_device_for_magic(
-                        npcap.as_ref(),
-                        &device,
-                        detection_timeout,
-                        &running,
-                    ) {
-                        detected_target = Some(CaptureTarget {
-                            device_name: device.name,
-                            target_port: Some(target_port_value),
-                        });
-                        break;
+                let detections = inspect_devices_for_magic(Arc::clone(&npcap), &devices, detection_timeout, &running);
+                for detection in &detections {
+                    logger.info(format!("capture scan: device={} flow={} hits={} eligible={}", detection.device_name, detection.flow, detection.hits, detection.hits >= MAGIC_MIN_HITS));
+                }
+                for device in &devices {
+                    if !detections.iter().any(|d| d.device_name == device.name) {
+                        logger.info(format!("capture scan: device={} flow=none hits=0 eligible=false", device.name));
                     }
                 }
+                let detected_target = choose_target(&devices, &detections).map(|d| CaptureTarget {
+                    device_name: d.device_name.clone(),
+                    target_port: Some(d.flow.clone()),
+                });
 
                 if let Some(target) = detected_target {
                     let detected_signature = format!(
@@ -341,9 +375,10 @@ impl PcapCapturer {
                     );
                     if detected_signature != last_detected_target {
                         logger.info(format!(
-                            "capture target detected: device={} port={}",
+                            "capture target detected: device={} flow={} reason={}",
                             target.device_name,
-                            target.target_port.as_deref().unwrap_or("--")
+                            target.target_port.as_deref().unwrap_or("--"),
+                            devices.iter().find(|device| device.name == target.device_name).map(|device| if device.is_virtual() { "plaintext game flow on loopback/tunnel; preferred over physical adapter" } else { "game flow on physical adapter; no preferred virtual capture observed" }).unwrap_or("selected highest-priority qualifying flow")
                         ));
                         last_detected_target = detected_signature;
                     }
@@ -358,16 +393,23 @@ impl PcapCapturer {
 
                     if should_restart {
                         stop_capture_threads(&capture_threads);
+                        *last_target_packet.lock().unwrap() = Some(Instant::now());
                         start_capture_thread(
                             Arc::clone(&npcap),
-                            target.device_name,
+                            target.device_name.clone(),
                             channel.clone(),
                             Arc::clone(&running),
                             Arc::clone(&capture_threads),
+                            Arc::clone(&last_target_packet),
+                            target.target_port.clone(),
                         );
                     }
+                    *last_target_packet.lock().unwrap() = Some(Instant::now());
+                    continue;
                 }
-
+                *target_device.write().unwrap() = None;
+                *target_port.write().unwrap() = None;
+                *last_target_packet.lock().unwrap() = None;
                 sleep_while_running(&running, detection_interval);
             }
 
@@ -392,6 +434,7 @@ impl PcapCapturer {
         stop_capture_threads(&self.capture_threads);
         *self.target_device.write().unwrap() = None;
         *self.target_port.write().unwrap() = None;
+        *self.last_target_packet.lock().unwrap() = None;
     }
 
     pub fn target_device(&self) -> Option<String> {
@@ -468,58 +511,71 @@ fn format_device_inventory(devices: &[DeviceInfo]) -> String {
 }
 
 fn prioritize_devices(mut devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
+    devices.retain(|device| device.is_loopback || device.has_addresses || device.is_virtual());
     devices.sort_by_key(|device| {
-        let loopback_priority = if device.is_loopback || device.is_virtual() {
-            0
-        } else {
-            1
-        };
-        let address_priority =
-            if !device.is_loopback && !device.is_virtual() && !device.has_addresses {
-                1
-            } else {
-                0
-            };
+        let loopback_priority = if device.is_loopback { 0 } else if device.is_virtual() { 1 } else { 2 };
         let name = device.label().to_ascii_lowercase();
-        (loopback_priority, address_priority, name)
+        (loopback_priority, name)
     });
     devices
 }
 
-fn inspect_device_for_magic(
-    npcap: &NpcapLib,
-    device: &DeviceInfo,
+#[derive(Debug, Clone)]
+struct DeviceDetection { device_name: String, flow: String, hits: u32 }
+
+/// A pcap handle owned by exactly one worker thread (opened here, read and closed only by that worker).
+struct WorkerHandle(PcapT);
+unsafe impl Send for WorkerHandle {}
+impl WorkerHandle {
+    // a method call makes the closure capture the whole wrapper, not the raw pointer field
+    fn get(&self) -> PcapT { self.0 }
+}
+
+fn inspect_devices_for_magic(
+    npcap: Arc<NpcapLib>,
+    devices: &[DeviceInfo],
     timeout: Duration,
     running: &Arc<AtomicBool>,
-) -> Option<String> {
-    let handle = npcap.open_live_handle(&device.name, 100).ok()?;
-    let started_at = Instant::now();
-
-    while running.load(Ordering::SeqCst) && started_at.elapsed() < timeout {
-        match next_captured_packet(npcap, handle) {
-            CaptureRead::Packet(packet) => {
-                if packet
-                    .data
-                    .windows(MAGIC_PATTERN.len())
-                    .any(|window| window == MAGIC_PATTERN)
-                {
-                    let (a, b) = if packet.src_port <= packet.dst_port {
-                        (packet.src_port, packet.dst_port)
-                    } else {
-                        (packet.dst_port, packet.src_port)
-                    };
-                    unsafe { (npcap.close)(handle) };
-                    return Some(format!("{a}-{b}"));
+)-> Vec<DeviceDetection> {
+    let opened: Vec<_> = devices.iter().filter_map(|device| {
+        match npcap.open_live_handle(&device.name, 100) {
+            Ok(handle) => Some((device.name.clone(), handle)),
+            Err(error) => { eprintln!("capture open failed device={} error={}", device.name, error); None }
+        }
+    }).collect();
+    let results = Arc::new(Mutex::new(Vec::<DeviceDetection>::new()));
+    let deadline = Instant::now() + timeout;
+    let mut workers = Vec::new();
+    for (device_name, handle) in opened {
+        let handle = WorkerHandle(handle);
+        let api = Arc::clone(&npcap);
+        let out = Arc::clone(&results);
+        let running = Arc::clone(running);
+        workers.push(thread::spawn(move || {
+            let mut hits: std::collections::HashMap<String,u32> = std::collections::HashMap::new();
+            while running.load(Ordering::SeqCst) && Instant::now() < deadline {
+                if let CaptureRead::Packet(packet) = next_captured_packet(api.as_ref(), handle.get()) {
+                    if packet.data.starts_with(&MAGIC_PATTERN) {
+                        let flow = directional_flow_key(&packet);
+                        *hits.entry(flow).or_default() += 1;
+                    }
                 }
             }
-            CaptureRead::Timeout => continue,
-            CaptureRead::End => break,
-            CaptureRead::Error => break,
-        }
+            unsafe { (api.close)(handle.get()) };
+            let mut out = out.lock().unwrap();
+            out.extend(hits.into_iter().map(|(flow,hits)| DeviceDetection { device_name: device_name.clone(), flow, hits }));
+        }));
     }
+    for worker in workers { let _ = worker.join(); }
+    let detections = results.lock().unwrap().clone();
+    detections
+}
 
-    unsafe { (npcap.close)(handle) };
-    None
+fn choose_target<'a>(devices: &'a [DeviceInfo], detections: &'a [DeviceDetection]) -> Option<&'a DeviceDetection> {
+    detections.iter().filter(|d| d.hits >= MAGIC_MIN_HITS).max_by(|a,b| {
+        let priority = |d: &DeviceDetection| devices.iter().find(|device| device.name == d.device_name).map(|device| if device.is_loopback { 2 } else if device.is_virtual() { 1 } else { 0 }).unwrap_or(0);
+        priority(a).cmp(&priority(b)).then_with(|| a.hits.cmp(&b.hits))
+    })
 }
 
 fn start_capture_thread(
@@ -527,8 +583,12 @@ fn start_capture_thread(
     device_name: String,
     channel: Channel<CapturedPacket>,
     running: Arc<AtomicBool>,
-    capture_threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    capture_threads: Arc<Mutex<Vec<(Arc<AtomicBool>, JoinHandle<()>)>>>,
+    last_target_packet: Arc<Mutex<Option<Instant>>>,
+    target_port: Option<String>,
 ) {
+    let capture_running = Arc::new(AtomicBool::new(true));
+    let thread_running = Arc::clone(&capture_running);
     let handle = thread::spawn(move || {
         let capture_handle = match npcap.open_live_handle(&device_name, 100) {
             Ok(handle) => handle,
@@ -538,9 +598,27 @@ fn start_capture_thread(
             }
         };
 
-        while running.load(Ordering::SeqCst) {
+        let mut server_magic_hits = std::collections::HashMap::<String, u32>::new();
+        let mut recognized_server_flows = std::collections::HashSet::<String>::new();
+        if let Some(flow) = target_port.as_ref() {
+            recognized_server_flows.insert(flow.clone());
+        }
+        while running.load(Ordering::SeqCst) && thread_running.load(Ordering::SeqCst) {
             match next_captured_packet(&npcap, capture_handle) {
                 CaptureRead::Packet(packet) => {
+                    let flow = directional_flow_key(&packet);
+                    if packet.data.starts_with(&MAGIC_PATTERN) {
+                        let hits = server_magic_hits.entry(flow.clone()).or_default();
+                        *hits = hits.saturating_add(1);
+                        if *hits >= MAGIC_MIN_HITS {
+                            recognized_server_flows.insert(flow.clone());
+                        }
+                    }
+                    // Game server packets start with the protocol magic. Client keepalives
+                    // and unrelated flows must not keep an idle target alive.
+                    if is_server_game_packet(&flow, &packet.data, &recognized_server_flows) {
+                        *last_target_packet.lock().unwrap() = Some(Instant::now());
+                    }
                     let _ = channel.try_send(packet);
                 }
                 CaptureRead::Timeout => continue,
@@ -552,16 +630,41 @@ fn start_capture_thread(
         unsafe { (npcap.close)(capture_handle) };
     });
 
-    capture_threads.lock().unwrap().push(handle);
+    capture_threads.lock().unwrap().push((capture_running, handle));
 }
 
-fn stop_capture_threads(capture_threads: &Arc<Mutex<Vec<JoinHandle<()>>>>) {
+fn directional_flow_key(packet: &CapturedPacket) -> String {
+    format!("{}:{}->{}:{}", format_ip(packet.src_ip), packet.src_port, format_ip(packet.dst_ip), packet.dst_port)
+}
+
+fn format_ip(ip: [u8; 4]) -> String {
+    format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+}
+
+fn target_is_fresh(idle_for: Duration) -> bool {
+    idle_for < Duration::from_secs(8)
+}
+
+fn should_rescan(last_server_packet: Option<Instant>, now: Instant) -> bool {
+    last_server_packet.is_none_or(|last| !target_is_fresh(now.saturating_duration_since(last)))
+}
+
+fn is_server_game_packet(
+    flow: &str,
+    data: &[u8],
+    recognized_server_flows: &std::collections::HashSet<String>,
+) -> bool {
+    recognized_server_flows.contains(flow) && data.starts_with(&MAGIC_PATTERN)
+}
+
+fn stop_capture_threads(capture_threads: &Arc<Mutex<Vec<(Arc<AtomicBool>, JoinHandle<()>)>>>) {
     let handles = {
         let mut guard = capture_threads.lock().unwrap();
         std::mem::take(&mut *guard)
     };
 
-    for handle in handles {
+    for (stop, handle) in handles {
+        stop.store(false, Ordering::SeqCst);
         let _ = handle.join();
     }
 }
@@ -680,5 +783,96 @@ fn sleep_while_running(running: &Arc<AtomicBool>, duration: Duration) {
     let deadline = Instant::now() + duration;
     while running.load(Ordering::SeqCst) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dev(name: &str, description: &str, loopback: bool, addresses: bool) -> DeviceInfo {
+        DeviceInfo { name: name.into(), description: description.into(), is_loopback: loopback, has_addresses: addresses }
+    }
+
+    fn ipv4_tcp_frame(prefix: &[u8], src_port: u16, payload: &[u8]) -> Vec<u8> {
+        let mut ip = vec![0u8; 40 + payload.len()];
+        ip[0] = 0x45;
+        let total = ip.len() as u16;
+        ip[2..4].copy_from_slice(&total.to_be_bytes());
+        ip[9] = 6;
+        ip[12..16].copy_from_slice(&[172, 19, 0, 1]);
+        ip[16..20].copy_from_slice(&[193, 202, 112, 113]);
+        ip[20..22].copy_from_slice(&src_port.to_be_bytes());
+        ip[22..24].copy_from_slice(&13328u16.to_be_bytes());
+        ip[32] = 0x50;
+        ip[40..].copy_from_slice(payload);
+        let mut frame = prefix.to_vec();
+        frame.extend(ip);
+        frame
+    }
+
+    fn parse_frame(frame: &[u8]) -> CapturedPacket {
+        let header = PcapPkthdr { ts_sec: 1_800_000_000, ts_usec: 0, caplen: frame.len() as u32, len: frame.len() as u32 };
+        parse_captured_packet(frame, &header).expect("synthetic TCP frame parses")
+    }
+
+    #[test]
+    fn parses_game_magic_from_raw_ip_ethernet_and_loopback_null_frames() {
+        for prefix in [&[][..], &[0, 0, 0, 2][..], &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 8, 0][..]] {
+            let frame = ipv4_tcp_frame(prefix, 54745, &[0x0e, 0x00, 0x36, 1]);
+            let packet = parse_frame(&frame);
+            assert!(packet.data.starts_with(&MAGIC_PATTERN));
+            assert_eq!((packet.src_port, packet.dst_port), (54745, 13328));
+        }
+    }
+
+    #[test]
+    fn https_noise_does_not_qualify_and_shared_flow_prefers_tunnel() {
+        let wan_without_address = dev("wan-miniport", "WAN Miniport", false, false);
+        let physical = dev("\\Device\\Physical", "Wi-Fi", false, true);
+        let tunnel = dev("\\Device\\Happ", "Happ Tunnel", false, true);
+        let devices = prioritize_devices(vec![wan_without_address, physical.clone(), tunnel.clone()]);
+        assert_eq!(devices.len(), 2, "addressless non-loopback adapters are skipped");
+        assert!(devices[0].is_virtual());
+        let packets = [
+            CapturedPacket { src_ip: [1,2,3,4], src_port: 50000, dst_ip: [5,6,7,8], dst_port: 443, sequence: 0, data: vec![0x16,3,1,0,0x0e,0,0x36], captured_at: 0.0 },
+            CapturedPacket { src_ip: [172,19,0,1], src_port: 54745, dst_ip: [193,202,112,113], dst_port: 13328, sequence: 1, data: vec![0x0e,0,0x36], captured_at: 0.0 },
+        ];
+        assert!(!packets[0].data.starts_with(&MAGIC_PATTERN));
+        let chosen = choose_target(&[physical, tunnel], &[
+            DeviceDetection { device_name: "\\Device\\Physical".into(), flow: "193.202.112.113:13328->172.19.0.1:54745".into(), hits: MAGIC_MIN_HITS },
+            DeviceDetection { device_name: "\\Device\\Happ".into(), flow: "193.202.112.113:13328->172.19.0.1:54745".into(), hits: MAGIC_MIN_HITS },
+            DeviceDetection { device_name: "\\Device\\Happ".into(), flow: "50000-443".into(), hits: 0 },
+        ]).unwrap();
+        assert_eq!(chosen.device_name, "\\Device\\Happ");
+        assert_eq!(chosen.flow, "193.202.112.113:13328->172.19.0.1:54745");
+    }
+
+    #[test]
+    fn client_keepalive_does_not_refresh_server_packet_staleness() {
+        let last_server_packet = Instant::now() - Duration::from_secs(9);
+        let client_keepalive = vec![0x01, 0x02, 0x03];
+        let server_flow = "193.202.112.113:13328->172.19.0.1:54745".to_string();
+        let reverse_client_flow = "172.19.0.1:54745->193.202.112.113:13328";
+        let recognized = std::collections::HashSet::from([server_flow]);
+        assert!(!is_server_game_packet(reverse_client_flow, &client_keepalive, &recognized));
+        assert!(!target_is_fresh(last_server_packet.elapsed()));
+        // The detector consumes this decision by logging stale and rescanning devices.
+        assert!(should_rescan(Some(last_server_packet), Instant::now()));
+    }
+
+    #[test]
+    fn directional_flow_key_distinguishes_server_and_client_packets() {
+        let server_packet = CapturedPacket {
+            src_ip: [193, 202, 112, 113], src_port: 13328,
+            dst_ip: [172, 19, 0, 1], dst_port: 54745,
+            sequence: 0, data: MAGIC_PATTERN.to_vec(), captured_at: 0.0,
+        };
+        let client_packet = CapturedPacket {
+            src_ip: server_packet.dst_ip, src_port: server_packet.dst_port,
+            dst_ip: server_packet.src_ip, dst_port: server_packet.src_port,
+            sequence: 0, data: vec![0, 0, 1], captured_at: 0.0,
+        };
+        assert_ne!(directional_flow_key(&server_packet), directional_flow_key(&client_packet));
     }
 }
