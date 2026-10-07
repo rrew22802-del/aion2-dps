@@ -14,6 +14,7 @@ use crate::dps_meter::models::combat::{
 use crate::dps_meter::models::packet::ParsedDamagePacket;
 use crate::dps_meter::models::combat::CombatEvent;
 use crate::dps_meter::storage::loaders::{load_boss_ids, load_healing_skill_codes, load_npc_names};
+use crate::dps_meter::storage::nearby::{NearbyPlayer, NearbyPlayers, Position};
 
 const ACTOR_METADATA_CAPACITY: usize = 2_000;
 const MOB_METADATA_CAPACITY: usize = 5_000;
@@ -192,6 +193,8 @@ struct DataStorageInner {
     combat_events: VecDeque<CombatEvent>,
     party_members: BoundedMap<u32, PartyMember>,
     party_updated_at: Option<u64>,
+    nearby_players: NearbyPlayers,
+    nearby_self_position: Option<Position>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -241,6 +244,8 @@ impl Default for DataStorageInner {
             combat_events: VecDeque::new(),
             party_members: BoundedMap::new(PARTY_MEMBER_CAPACITY),
             party_updated_at: None,
+            nearby_players: NearbyPlayers::default(),
+            nearby_self_position: None,
         }
     }
 }
@@ -296,6 +301,8 @@ impl DataStorage {
         let actor_id_skill_spec_map = inner.actor_id_skill_spec_map.clone();
         let party_members = inner.party_members.clone();
         let party_updated_at = inner.party_updated_at;
+        let nearby_players = inner.nearby_players.clone();
+        let nearby_self_position = inner.nearby_self_position;
 
         let mob_id_code_map = inner.mob_id_code_map.clone();
         let mob_id_hp_map = inner.mob_id_hp_map.clone();
@@ -321,6 +328,8 @@ impl DataStorage {
         inner.actor_id_skill_spec_map = actor_id_skill_spec_map;
         inner.party_members = party_members;
         inner.party_updated_at = party_updated_at;
+        inner.nearby_players = nearby_players;
+        inner.nearby_self_position = nearby_self_position;
 
         inner.mob_id_code_map = mob_id_code_map;
         inner.mob_id_hp_map = mob_id_hp_map;
@@ -426,6 +435,7 @@ impl DataStorage {
         if let Some(owner_id) = inner.summon_owner_map.get(&actor_id) {
             actor_id = *owner_id;
         }
+        inner.nearby_players.add_damage(actor_id, packet.damage, (timestamp.max(0.0) * 1000.0) as u64);
 
         let target_mob_code = inner.mob_id_code_map.get(&packet.target_id).copied();
         let is_target_boss = target_mob_code
@@ -602,6 +612,39 @@ impl DataStorage {
         inner.summon_owner_map.map.remove(&actor_id);
     }
 
+    pub fn upsert_nearby_player(&self, actor_id: u32, server: Option<u32>, class: Option<&'static str>, cp: Option<u64>) {
+        let now = current_timestamp_millis();
+        self.inner.write().unwrap().nearby_players.upsert(actor_id, server, class, cp, now);
+    }
+
+    pub fn nearby_snapshot(&self) -> (Option<u32>, Option<Position>, Vec<NearbyPlayer>) {
+        let now = current_timestamp_millis();
+        let mut inner = self.inner.write().unwrap();
+        let self_id = inner.main_actor_id;
+        let self_position = inner.nearby_self_position;
+        let rows = inner.nearby_players.snapshot(now).into_iter()
+            .filter(|entry| Some(entry.id) != self_id)
+            .map(|entry| NearbyPlayer {
+                id: entry.id,
+                name: inner.actor_id_name_map.get(&entry.id).cloned().unwrap_or_default(),
+                server: entry.server,
+                class: entry.class,
+                level: entry.level,
+                cp: entry.cp,
+                legion: entry.legion,
+                last_seen: entry.last_seen,
+                last_position: entry.last_position,
+                in_party: entry.in_party,
+                seen_damage: entry.seen_damage,
+            })
+            .collect();
+        (self_id, self_position, rows)
+    }
+
+    pub fn set_nearby_self_position(&self, position: Option<Position>) {
+        self.inner.write().unwrap().nearby_self_position = position;
+    }
+
     pub fn set_actor_class(&self, actor_id: u32, actor_class: &str) {
         self.inner
             .write()
@@ -610,9 +653,7 @@ impl DataStorage {
             .insert(actor_id, actor_class.to_string());
     }
 
-    /// A 45 36 member-info update is the only confirmed party membership
-    /// message so far. Refresh the member metadata without moving owned strings
-    /// out of a parser closure.
+    /// Store the local-character metadata for the current party snapshot.
     pub fn upsert_party_member(&self, actor_id: u32, name: &str, class: Option<&str>) {
         let mut inner = self.inner.write().unwrap();
         inner.party_members.insert(actor_id, PartyMember {
@@ -784,6 +825,7 @@ impl DataStorage {
                 && !(inner.main_actor_id == Some(actor_id) && inner.main_actor_name.as_deref() == Some(""));
             if is_new_player {
                 inner.main_actor_combat_power = None;
+                inner.nearby_self_position = None;
                 inner.party_members.map.clear();
                 inner.party_members.order.clear();
                 inner.party_updated_at = Some(current_timestamp_millis());

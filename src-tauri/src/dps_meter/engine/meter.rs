@@ -231,6 +231,10 @@ impl DpsMeter {
         self.data_storage.party_snapshot()
     }
 
+    pub fn nearby_snapshot(&self) -> (Option<u32>, Option<crate::dps_meter::storage::nearby::Position>, Vec<crate::dps_meter::storage::nearby::NearbyPlayer>) {
+        self.data_storage.nearby_snapshot()
+    }
+
     pub fn field_boss_timer_snapshot(&self) -> Vec<(u32, u32, u64, u64)> {
         self.data_storage.field_boss_timer_snapshot()
     }

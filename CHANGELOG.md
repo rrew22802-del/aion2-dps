@@ -9,6 +9,12 @@ lives in the [NOIA2 repository](https://github.com/ZDYoung0519/NOIA2).
      and some players still update from there: so no hard wraps and no bold in
      2.0.0 and later. From 2.0.0 on the dialog renders Markdown. -->
 
+## [2.7.0]
+
+- Adds `GET /v1/nearby` with a bounded 120-second table of players observed via `45 36`, including known name, class, optional server/CP, and attributed damage.
+- Corrects the earlier `45 36` party-only interpretation: it is a visible-player update. Documents verified and unknown fields; `45 37` is no longer treated as a confirmed party leave or nearby despawn.
+- Updates the app, Cargo, and Tauri version to 2.7.0.
+
 ## [2.6.2]
 
 - Game flow liveness now follows server-to-client protocol packets. After eight quiet seconds the capture scans all adapters again and can switch to a replacement flow.

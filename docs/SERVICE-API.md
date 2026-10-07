@@ -12,9 +12,10 @@ The server listens only on `127.0.0.1:<port>`. The token must be nonempty ASCII.
 
 | Method | Path | Response |
 | --- | --- | --- |
-| GET | `/v1/health` | `{ "version": "2.6.2", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
+| GET | `/v1/health` | `{ "version": "2.7.0", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
 | GET | `/v1/state` | Current fight (shape below). When idle: `fightId`, `startedAt`, and `target` are `null`; `active` is `false`, numbers are zero, and `players` is empty. |
 | GET | `/v1/party` | `{ "members": [{"id": 16450, "name": "…", "class": "GLADIATOR"}], "updatedAt": 1790000000000 }` current known party members. |
+| GET | `/v1/nearby` | `{ "self": {"x": null, "y": null, "z": null}, "players": [...] }` recent visible players; order is by distance when positions are available. |
 | GET | `/v1/live` | Current self buffs, self-applied effects on the current or pinned target, recent own skill uses, and target HP. `?target=<id>` pins a known mob target. |
 | GET | `/v1/field-bosses` | Field-boss spawn timers last received from packet `01 91`; names are `null` with `--lang ru`. |
 | GET | `/v1/assets/aion2/class/{name}.png` or `/v1/assets/aion2/skill/{name}.png` | Bundled icon bytes. Only PNG files directly in those two folders are served; missing or invalid paths return 404. |
@@ -57,11 +58,13 @@ For a tracker-hosted tab, launch the executable separately with `--embedded --pa
 }
 ```
 
-`/v1/state` and archived fight players also expose `cp` (combat power, or `null` when not observed), `deaths`, `healTotal`, `hps`, and `inParty`. `inParty` is true for the main character and members in the latest known party roster; for other players it is false until a member-info packet identifies them. Archived records preserve the roster captured when the fight was saved. `/v1/history` rows include a `players` array with the same `inParty` field. `GET /v1/party` returns the current roster; `updatedAt` is Unix milliseconds or `null` before the first update. A party roster is cleared when the main character changes, on a parsed leave/disband action, and is refreshed by member-info updates. Alliance membership is not distinguished by the observed packet data, so this endpoint describes the party only. Healing totals cover healing packets with a decoded amount and are counted across targets; HPS divides by that player's observed fight duration. A packet without an amount contributes nothing.
+`/v1/state` and archived fight players also expose `cp` (combat power, or `null` when not observed), `deaths`, `healTotal`, `hps`, and `inParty`. `inParty` is true for the main character and members in the latest known party roster; for other players it remains false because no party-only membership packet has been confirmed. Archived records preserve the roster captured when the fight was saved. `/v1/history` rows include a `players` array with the same `inParty` field. `GET /v1/party` returns the current roster; `updatedAt` is Unix milliseconds or `null` before the first update. A party roster is cleared when the main character changes and refreshed by local-character identity updates. `45 37` is not confirmed as a leave action and does not remove a member; `45 38` remains provisional. Alliance membership is not distinguished by the observed packet data, so this endpoint describes the party only. Healing totals cover healing packets with a decoded amount and are counted across targets; HPS divides by that player's observed fight duration. A packet without an amount contributes nothing.
 
 `GET /v1/fights/{fightId}/timeline?player={id}` returns `{ "durationMs", "damagePerSecond": [{"offsetMs", "playerDamage", "groupDamage"}], "casts": [{"offsetMs", "skillCode", "damage", "crit"}], "buffs": [{"startOffsetMs", "endOffsetMs", "skillCode", "sourceId"}] }`. Resolution and included duration are capped at 20 minutes (1,200 one-second buckets); casts are capped at 25,000. Buff intervals are returned when the existing buff parser stored them. An unknown fight or player returns 404; a missing or invalid player query returns 400.
 
 `GET /v1/live` returns active effect intervals and own skill uses from the current session. Names follow `--lang en|ru`; missing catalogue entries are empty strings for skills and `null` for the target name. Timestamps are Unix milliseconds. Example:
+
+`GET /v1/nearby` returns players observed in `45 36` within the last 120 seconds, up to 500 entries. Each row has `id`, `name`, nullable `server`, `class`, `level`, `cp`, `legion`, `lastSeen` (Unix milliseconds), `lastPosition`, `inParty`, and `seenDamage`. `seenDamage` is the accumulated damage attributed to that actor in parsed combat packets during the current retained row. Party membership is self-only because a reliable party roster opcode has not been confirmed. Current captures do not establish player coordinates; therefore `self.x/y/z` and `lastPosition` are `null`, and rows are ordered by ID until position decoding is confirmed. Rows expire after 120 seconds without a `45 36` update. No packet is currently treated as a confirmed nearby-player despawn.
 
 ```json
 {

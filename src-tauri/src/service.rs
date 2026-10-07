@@ -261,6 +261,33 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
             let party = meter.party_snapshot();
             (200, json!({"members": party.members, "updatedAt": party.updated_at}), false)
         }
+        (Method::Get, "/v1/nearby") => {
+            let (_self_id, self_position, mut players) = meter.nearby_snapshot();
+            players.sort_by(|a, b| {
+                let distance = |player: &crate::dps_meter::storage::nearby::NearbyPlayer| {
+                    player.last_position.and_then(|position| self_position.map(|self_position| {
+                        let x = self_position.x;
+                        let y = self_position.y;
+                        let z = self_position.z;
+                        let dx = position.x - x;
+                        let dy = position.y - y;
+                        let dz = position.z - z;
+                        dx * dx + dy * dy + dz * dz
+                    }))
+                };
+                match (distance(a), distance(b)) {
+                    (Some(a), Some(b)) => a.total_cmp(&b),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => a.id.cmp(&b.id),
+                }
+            });
+            (200, json!({"self": {
+                "x": self_position.map(|position| position.x),
+                "y": self_position.map(|position| position.y),
+                "z": self_position.map(|position| position.z),
+            }, "players": players}), false)
+        }
         (Method::Get, "/v1/targets") => (200, targets_json(meter.get_dps_snapshot(0).as_ref(), lang), false),
         (Method::Get, "/v1/field-bosses") => {
             let now_ms = std::time::SystemTime::now()

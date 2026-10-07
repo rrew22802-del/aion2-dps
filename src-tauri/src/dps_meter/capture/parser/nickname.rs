@@ -107,29 +107,81 @@ pub(crate) fn parse_other(
     payload: &[u8],
     _is_compressed_bundle: bool,
 ) -> bool {
+    let Some(player) = decode_other_player(payload) else { return false; };
+    let actor_id = player.actor_id;
+    let actor_name = player.name;
+    let job = player.job;
+    let actor_class = player.class;
+    let server_id = player.server_id;
+    let combat_power = player.combat_power;
+
+    let server_id_string = server_id.map(|value| value.to_string());
+    let server_id_text = server_id_string.as_deref().unwrap_or("none");
+    context
+        .data_storage
+        .append_actor(actor_id, &actor_name, server_id_string.as_deref());
+    if let Some(actor_class) = actor_class {
+        context.data_storage.set_actor_class(actor_id, actor_class);
+    }
+    if let Some(combat_power) = combat_power {
+        context
+            .data_storage
+            .set_actor_combat_power(actor_id, combat_power);
+    }
+    context.data_storage.upsert_nearby_player(actor_id, server_id, actor_class, combat_power);
+    // 45 36 is every visible player (138 names in a town capture, 07.10), NOT the party: it must not
+    // touch the roster. The real party packet is still unknown; until it is found the party is self only.
+    context.logger.info(format!(
+        "[{}] actor actor={} name={} sid={} job={} class={} combat_power={}",
+        context.port,
+        actor_id,
+        actor_name,
+        server_id_text,
+        job,
+        actor_class.unwrap_or("none"),
+        combat_power
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ));
+
+    true
+}
+
+struct OtherPlayer {
+    actor_id: u32,
+    name: String,
+    job: u8,
+    class: Option<&'static str>,
+    server_id: Option<u32>,
+    combat_power: Option<u64>,
+}
+
+fn decode_other_player(payload: &[u8]) -> Option<OtherPlayer> {
+    if payload.get(..2)? != [0x45, 0x36] { return None; }
     let actor_id_info = read_varint(payload, 2);
-    let Some(actor_id) = decode_party_member_id(payload) else { return false; };
+    if !actor_id_info.is_valid() || actor_id_info.value <= 0 { return None; }
+    let actor_id = actor_id_info.value as u32;
     let mut offset = 2 + actor_id_info.length;
     if payload.len() <= offset {
-        return false;
+        return None;
     }
 
     let unknown_info_1 = read_varint(payload, offset);
     if !unknown_info_1.is_valid() {
-        return false;
+        return None;
     }
     offset += unknown_info_1.length;
     if payload.len() <= offset {
-        return false;
+        return None;
     }
 
     let unknown_info_2 = read_varint(payload, offset);
     if !unknown_info_2.is_valid() {
-        return false;
+        return None;
     }
     offset += unknown_info_2.length;
     if payload.len().saturating_sub(offset) <= 2 {
-        return false;
+        return None;
     }
 
     offset += 1;
@@ -175,14 +227,10 @@ pub(crate) fn parse_other(
         }
     }
 
-    let Some(actor_name) = best_actor_name else {
-        return false;
-    };
-    let Some(actor_name_end) = best_actor_name_end else {
-        return false;
-    };
+    let actor_name = best_actor_name?;
+    let actor_name_end = best_actor_name_end?;
     if actor_name_end >= payload.len() {
-        return false;
+        return None;
     }
 
     let job = payload[actor_name_end];
@@ -191,53 +239,13 @@ pub(crate) fn parse_other(
     let server_id = find_server_id(payload, server_base);
     let combat_power = parse_snapshot_combat_power(payload);
 
-    let server_id_string = server_id.map(|value| value.to_string());
-    let server_id_text = server_id_string.as_deref().unwrap_or("none");
-    context
-        .data_storage
-        .append_actor(actor_id, &actor_name, server_id_string.as_deref());
-    if let Some(actor_class) = actor_class {
-        context.data_storage.set_actor_class(actor_id, actor_class);
-    }
-    if let Some(combat_power) = combat_power {
-        context
-            .data_storage
-            .set_actor_combat_power(actor_id, combat_power);
-    }
-    // 45 36 is every visible player (138 names in a town capture, 07.10), NOT the party: it must not
-    // touch the roster. The real party packet is still unknown; until it is found the party is self only.
-    context.logger.info(format!(
-        "[{}] actor actor={} name={} sid={} job={} class={} combat_power={}",
-        context.port,
-        actor_id,
-        actor_name,
-        server_id_text,
-        job,
-        actor_class.unwrap_or("none"),
-        combat_power
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "none".to_string())
-    ));
-
-    true
+    Some(OtherPlayer { actor_id, name: actor_name, job, class: actor_class, server_id, combat_power })
 }
 
-fn decode_party_member_id(payload: &[u8]) -> Option<u32> {
-    match decode_party_packet(payload)? {
-        PartyPacket::MemberInfo(id) => Some(id),
-        _ => None,
-    }
-}
-
-/// Party action packets encode the affected actor as the first varint after
-/// their two-byte opcode. These are kept separate from member-info (45 36),
-/// whose longer layout also carries name and class metadata.
+/// Only handle actions whose semantics are established. `45 37` currently
+/// has no confirmed party meaning, so it must not remove a roster member.
 pub(crate) fn parse_party_action(context: &ParserContext<'_>, payload: &[u8]) -> bool {
     match decode_party_action(payload) {
-        Some(PartyAction::Leave(actor_id)) => {
-            context.data_storage.remove_party_member(actor_id);
-            true
-        }
         Some(PartyAction::Disband) => {
             context.data_storage.clear_party();
             true
@@ -248,25 +256,23 @@ pub(crate) fn parse_party_action(context: &ParserContext<'_>, payload: &[u8]) ->
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PartyAction {
-    Leave(u32),
     Disband,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PartyPacket {
-    MemberInfo(u32),
-    Leave(u32),
+    UnconfirmedAction(u32),
     Disband,
 }
 
 fn decode_party_packet(payload: &[u8]) -> Option<PartyPacket> {
     if payload.len() < 2 || payload[0] != 0x45 { return None; }
     match payload[1] {
-        0x36 | 0x37 => {
+        0x37 => {
             let actor = read_varint(payload, 2);
             if !actor.is_valid() || actor.value <= 0 { return None; }
             let actor_id = actor.value as u32;
-            Some(if payload[1] == 0x36 { PartyPacket::MemberInfo(actor_id) } else { PartyPacket::Leave(actor_id) })
+            Some(PartyPacket::UnconfirmedAction(actor_id))
         }
         0x38 => Some(PartyPacket::Disband),
         _ => None,
@@ -275,9 +281,8 @@ fn decode_party_packet(payload: &[u8]) -> Option<PartyPacket> {
 
 fn decode_party_action(payload: &[u8]) -> Option<PartyAction> {
     match decode_party_packet(payload)? {
-        PartyPacket::Leave(id) => Some(PartyAction::Leave(id)),
         PartyPacket::Disband => Some(PartyAction::Disband),
-        PartyPacket::MemberInfo(_) => None,
+        PartyPacket::UnconfirmedAction(_) => None,
     }
 }
 
@@ -453,23 +458,38 @@ fn is_han_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_party_action, decode_party_member_id, decode_party_packet, sanitize_nickname, PartyAction, PartyPacket};
+    use super::{decode_other_player, decode_party_action, decode_party_packet, sanitize_nickname, PartyAction, PartyPacket};
 
     #[test]
-    fn synthetic_party_join_and_update_use_member_info_opcode() {
-        let initial = [0x45, 0x36, 42, 0x00, 0x00, 0x00];
-        let update = [0x45, 0x36, 42, 0x01, 0x00, 0x00];
-        assert_eq!(decode_party_member_id(&initial), Some(42));
-        assert_eq!(decode_party_member_id(&update), Some(42));
-        assert_eq!(decode_party_packet(&initial), Some(PartyPacket::MemberInfo(42)));
-        assert_eq!(decode_party_member_id(&[0x44, 0x36, 42]), None);
+    fn captured_town_samples_decode_name_and_job_class() {
+        let fixture = include_str!("../../../../tests/fixtures/45-36-town.hex");
+        let expected = [
+            ("Sempialia", Some("CHANTER")), ("Smolsaka", Some("SORCERER")), ("Connnnix", Some("SORCERER")),
+            ("Mikemon", Some("TEMPLAR")), ("Sonofman", Some("CHANTER")), ("fhdgs", Some("TEMPLAR")),
+            ("Анджелина", Some("CHANTER")), ("辣条哟i", Some("RANGER")),
+        ];
+        let rows: Vec<_> = fixture.lines().filter(|line| !line.starts_with('#')).collect();
+        assert_eq!(rows.len(), expected.len());
+        for (line, (name, class)) in rows.into_iter().zip(expected) {
+            let bytes: Vec<u8> = line.split_whitespace().map(|byte| u8::from_str_radix(byte, 16).unwrap()).collect();
+            let player = decode_other_player(&bytes).expect("captured 45 36 player");
+            assert!(player.actor_id > 0);
+            assert_eq!(player.name, name);
+            assert_eq!(player.class, class);
+        }
     }
 
     #[test]
-    fn synthetic_party_leave_and_disband_packets_decode() {
-        assert_eq!(decode_party_action(&[0x45, 0x37, 0xAC, 0x02]), Some(PartyAction::Leave(300)));
+    fn visible_player_packet_is_not_a_party_action() {
+        assert_eq!(decode_party_action(&[0x45, 0x36, 42]), None);
+        assert_eq!(decode_party_packet(&[0x45, 0x36, 42]), None);
+    }
+
+    #[test]
+    fn unconfirmed_45_37_does_not_remove_party_members() {
+        assert_eq!(decode_party_action(&[0x45, 0x37, 0xAC, 0x02]), None);
         assert_eq!(decode_party_action(&[0x45, 0x38]), Some(PartyAction::Disband));
-        assert_eq!(decode_party_packet(&[0x45, 0x37, 0xAC, 0x02]), Some(PartyPacket::Leave(300)));
+        assert_eq!(decode_party_packet(&[0x45, 0x37, 0xAC, 0x02]), Some(PartyPacket::UnconfirmedAction(300)));
         assert_eq!(decode_party_packet(&[0x45, 0x38]), Some(PartyPacket::Disband));
         assert_eq!(decode_party_action(&[0x45, 0x37, 0x80]), None);
         assert_eq!(decode_party_action(&[0x46, 0x37, 1]), None);
