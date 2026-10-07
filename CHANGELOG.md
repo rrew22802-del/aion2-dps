@@ -9,6 +9,12 @@ lives in the [NOIA2 repository](https://github.com/ZDYoung0519/NOIA2).
      and some players still update from there: so no hard wraps and no bold in
      2.0.0 and later. From 2.0.0 on the dialog renders Markdown. -->
 
+## [2.8.0]
+
+- Adds fight damage-taken totals and per-source breakdowns, bounded death recaps, per-player buff uptime, and observed NPC skill timelines to the local service API.
+- Adds nullable `mapId` to history rows; no map identity is reported until the packet data can establish it reliably.
+- Raises bounded service, Cargo, Tauri, and app version to 2.8.0.
+
 ## [2.7.0]
 
 - Adds `GET /v1/nearby` with a bounded 120-second table of players observed via `45 36`, including known name, class, optional server/CP, and attributed damage.

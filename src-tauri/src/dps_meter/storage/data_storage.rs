@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::dps_meter::config::{SharedDpsMeterConfig, TRAINING_DUMMY_MOB_CODE};
 use crate::dps_meter::models::combat::{
-    BuffInterval, BuffSummary, PlayerHpInfo, PvpCombatStats, PvpCombatStatsRow, PvpKnownPlayer,
+    BossCast, DeathRecap, RecapEvent, TakenSourceStat, BuffInterval, BuffSummary, PlayerHpInfo, PvpCombatStats, PvpCombatStatsRow, PvpKnownPlayer,
     PvpWatchInfo, PvpWatchInfoResponse, SkillStats,
 };
 use crate::dps_meter::models::packet::ParsedDamagePacket;
@@ -23,6 +23,11 @@ const MOB_METADATA_CAPACITY: usize = 5_000;
 const COMBAT_TARGET_CAPACITY: usize = 512;
 const SUMMON_METADATA_CAPACITY: usize = 5_000;
 const COMBAT_EVENT_CAPACITY: usize = 100_000;
+const DEATH_RECAP_CAPACITY: usize = 128;
+const RECENT_PLAYER_EVENTS: usize = 2_000;
+const RECENT_EVENTS_PER_PLAYER: usize = 10;
+const BOSS_CAST_CAPACITY: usize = 5_000;
+const TAKEN_PLAYERS_PER_FIGHT: usize = 24;
 const PARTY_MEMBER_CAPACITY: usize = 24;
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,6 +200,10 @@ struct DataStorageInner {
     party_updated_at: Option<u64>,
     nearby_players: NearbyPlayers,
     nearby_self_position: Option<Position>,
+    damage_taken_by_target: BoundedMap<u32, HashMap<u32, Vec<TakenSourceStat>>>,
+    recent_player_events: BoundedMap<u32, VecDeque<RecapEvent>>,
+    death_recaps_by_target: BoundedMap<u32, VecDeque<DeathRecap>>,
+    boss_casts_by_target: BoundedMap<u32, VecDeque<BossCast>>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -246,6 +255,10 @@ impl Default for DataStorageInner {
             party_updated_at: None,
             nearby_players: NearbyPlayers::default(),
             nearby_self_position: None,
+            damage_taken_by_target: BoundedMap::new(COMBAT_TARGET_CAPACITY),
+            recent_player_events: BoundedMap::new(RECENT_PLAYER_EVENTS),
+            death_recaps_by_target: BoundedMap::new(COMBAT_TARGET_CAPACITY),
+            boss_casts_by_target: BoundedMap::new(COMBAT_TARGET_CAPACITY),
         }
     }
 }
@@ -413,7 +426,9 @@ impl DataStorage {
         let config = self.config.read().unwrap().clone();
         let mut inner = self.inner.write().unwrap();
 
-        if self.healing_skill_codes.contains(&packet.skill_code) {
+        let at_ms = (timestamp.max(0.0) * 1000.0) as u64;
+        let is_heal = self.healing_skill_codes.contains(&packet.skill_code);
+        if is_heal {
             if packet.actor_id != 0 && packet.damage > 0 {
                 let actor = inner.summon_owner_map.get(&packet.actor_id).copied().unwrap_or(packet.actor_id);
                 let total = inner.healing_totals.get_mut_or_insert_with(actor, || 0);
@@ -421,6 +436,14 @@ impl DataStorage {
                 let target = inner.last_target_by_main_actor.or(inner.last_target).unwrap_or(packet.target_id);
                 let actor_heals = inner.healing_by_target.get_mut_or_insert_with(target, HashMap::new).entry(actor).or_default();
                 *actor_heals = actor_heals.saturating_add(packet.damage);
+                if inner.actor_id_name_map.contains_key(&packet.target_id) && !inner.mob_id_code_map.contains_key(&packet.target_id) {
+                    let event = RecapEvent { kind: "heal".into(), source_id: packet.actor_id,
+                        source_name: inner.actor_id_name_map.get(&packet.actor_id).cloned(), skill_code: packet.ori_skill_code,
+                        amount: packet.damage, crit: false, at_ms, hp_after: None };
+                    let events = inner.recent_player_events.get_mut_or_insert_with(packet.target_id, VecDeque::new);
+                    events.push_back(event);
+                    while events.len() > RECENT_EVENTS_PER_PLAYER { events.pop_front(); }
+                }
             }
             return;
         }
@@ -446,6 +469,38 @@ impl DataStorage {
             .unwrap_or(false);
         let is_target_player = inner.actor_id_name_map.contains_key(&packet.target_id)
             && !inner.mob_id_code_map.contains_key(&packet.target_id);
+
+        if is_target_player {
+            let source_entity_id = packet.actor_id;
+            let source_name = inner.actor_id_name_map.get(&source_entity_id).cloned();
+            let npc_id = inner.mob_id_code_map.get(&source_entity_id).copied();
+            if let Some(fight_target) = inner.last_target_by_main_actor.or(inner.last_target) {
+                let can_track_player = inner.damage_taken_by_target.get(&fight_target)
+                    .is_some_and(|players| players.contains_key(&packet.target_id) || players.len() < TAKEN_PLAYERS_PER_FIGHT)
+                    || !inner.damage_taken_by_target.contains_key(&fight_target);
+                if can_track_player {
+                    let taken = inner.damage_taken_by_target.get_mut_or_insert_with(fight_target, HashMap::new)
+                        .entry(packet.target_id).or_default();
+                    if let Some(existing) = taken.iter_mut().find(|entry| entry.source_id == source_entity_id && entry.skill_code == packet.ori_skill_code) {
+                        existing.damage = existing.damage.saturating_add(packet.damage);
+                    } else if taken.len() < 128 {
+                        taken.push(TakenSourceStat { source_id: source_entity_id, npc_id, source_name: source_name.clone(), skill_code: packet.ori_skill_code, damage: packet.damage });
+                    }
+                }
+            }
+            let events = inner.recent_player_events.get_mut_or_insert_with(packet.target_id, VecDeque::new);
+            events.push_back(RecapEvent { kind: "hit".into(), source_id: source_entity_id, source_name,
+                skill_code: packet.ori_skill_code, amount: packet.damage, crit: packet.is_crit, at_ms, hp_after: None });
+            while events.len() > RECENT_EVENTS_PER_PLAYER { events.pop_front(); }
+        }
+
+        if let Some(npc_id) = inner.mob_id_code_map.get(&packet.actor_id).copied() {
+            if let Some(fight_target) = inner.last_target_by_main_actor.or(inner.last_target) {
+                let casts = inner.boss_casts_by_target.get_mut_or_insert_with(fight_target, VecDeque::new);
+                casts.push_back(BossCast { npc_id, skill: packet.ori_skill_code, at_ms });
+                while casts.len() > BOSS_CAST_CAPACITY { casts.pop_front(); }
+            }
+        }
 
         if config.boss_only && !is_target_boss && !(config.pvp_mode_on && is_target_player) {
             self.boss_only_filtered.fetch_add(1, Ordering::Relaxed);
@@ -931,6 +986,26 @@ impl DataStorage {
 
     pub fn combat_events_snapshot(&self) -> Vec<CombatEvent> {
         self.inner.read().unwrap().combat_events.iter().cloned().collect()
+    }
+
+    pub fn extended_fight_snapshot(&self) -> (HashMap<u32, HashMap<u32, Vec<TakenSourceStat>>>, HashMap<u32, Vec<DeathRecap>>, HashMap<u32, Vec<BossCast>>) {
+        let inner = self.inner.read().unwrap();
+        (inner.damage_taken_by_target.as_hash_map(),
+            inner.death_recaps_by_target.as_hash_map().into_iter().map(|(id, values)| (id, values.into_iter().collect())).collect(),
+            inner.boss_casts_by_target.as_hash_map().into_iter().map(|(id, values)| (id, values.into_iter().collect())).collect())
+    }
+
+    pub fn record_player_hp(&self, player_id: u32, hp: u32, at_ms: u64) {
+        let mut inner = self.inner.write().unwrap();
+        if let Some(events) = inner.recent_player_events.get_mut_or_insert_with(player_id, VecDeque::new).back_mut() {
+            if events.at_ms == at_ms { events.hp_after = Some(hp); }
+        }
+        if hp != 0 || !inner.actor_id_name_map.contains_key(&player_id) || inner.dead_entities.contains(&player_id) { return; }
+        let Some(target) = inner.last_target_by_main_actor.or(inner.last_target) else { return; };
+        let events = inner.recent_player_events.get(&player_id).map(|items| items.iter().cloned().collect()).unwrap_or_default();
+        let recaps = inner.death_recaps_by_target.get_mut_or_insert_with(target, VecDeque::new);
+        recaps.push_back(DeathRecap { player_id, at_ms, events });
+        while recaps.len() > DEATH_RECAP_CAPACITY { recaps.pop_front(); }
     }
 
     pub fn main_actor_combat_power(&self) -> Option<u64> {

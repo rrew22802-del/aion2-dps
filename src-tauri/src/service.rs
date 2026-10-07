@@ -13,7 +13,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::dps_meter::engine::meter::DpsMeter;
 use crate::dps_meter::history::HistoryRecord;
-use crate::dps_meter::models::combat::{CombatSnapshot, PlayerOverviewStat, SkillStats, TargetInfo};
+use crate::dps_meter::models::combat::{BossCast, CombatSnapshot, PlayerOverviewStat, SkillStats, TakenSourceStat, TargetInfo};
 
 #[derive(Clone)]
 pub struct Options {
@@ -429,6 +429,37 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
                 _ => (400, json!({"error":"player is required"}), false),
             }
         }
+        (Method::Get, _) if path.starts_with("/v1/fights/") && path.ends_with("/taken") => {
+            let fight = path.trim_start_matches("/v1/fights/").trim_end_matches("/taken").trim_end_matches('/');
+            match (fight, query_value(query, "player").and_then(|id| id.parse::<u32>().ok())) {
+                (fight, Some(player)) if !fight.is_empty() => match selected_fight(&meter, fight) {
+                    Some(selected) => (200, taken_for(&selected, player, &meter, lang), false),
+                    None => (404, json!({"error":"fight not found"}), false),
+                },
+                _ => (400, json!({"error":"player is required"}), false),
+            }
+        }
+        (Method::Get, _) if path.starts_with("/v1/fights/") && path.ends_with("/deaths") => {
+            let fight = path.trim_start_matches("/v1/fights/").trim_end_matches("/deaths").trim_end_matches('/');
+            match selected_fight(&meter, fight) {
+                Some(selected) => (200, deaths_for(&selected), false),
+                None => (404, json!({"error":"fight not found"}), false),
+            }
+        }
+        (Method::Get, _) if path.starts_with("/v1/fights/") && path.ends_with("/buffs") => {
+            let fight = path.trim_start_matches("/v1/fights/").trim_end_matches("/buffs").trim_end_matches('/');
+            match selected_fight(&meter, fight) {
+                Some(selected) => (200, buffs_for_all(&selected), false),
+                None => (404, json!({"error":"fight not found"}), false),
+            }
+        }
+        (Method::Get, _) if path.starts_with("/v1/fights/") && path.ends_with("/boss-casts") => {
+            let fight = path.trim_start_matches("/v1/fights/").trim_end_matches("/boss-casts").trim_end_matches('/');
+            match selected_fight(&meter, fight) {
+                Some(selected) => (200, boss_casts_for(&selected), false),
+                None => (404, json!({"error":"fight not found"}), false),
+            }
+        }
         (Method::Get, _) if path.starts_with("/v1/players/") && path.ends_with("/skills") => {
             let id = path.trim_start_matches("/v1/players/").trim_end_matches("/skills");
             match (id.parse::<u32>(), query_value(query, "fight")) {
@@ -532,17 +563,50 @@ fn player_json(p: &PlayerOverviewStat, self_id: Option<u32>, owners: Option<&Has
         "healTotal": p.heal_total, "hps": p.hps})
 }
 
+fn add_damage_taken(player: &mut Value, sources: &[TakenSourceStat]) {
+    player["damageTaken"] = json!(sources.iter().map(|source| source.damage).sum::<u64>());
+}
+
+fn add_taken_only_players(
+    state: &mut Value,
+    taken: &HashMap<u32, Vec<TakenSourceStat>>,
+    actors: &HashMap<u32, crate::dps_meter::models::combat::ActorInfo>,
+    self_id: Option<u32>, owners: Option<&HashSet<u32>>, party_ids: &HashSet<u32>, lang: &str,
+) {
+    let Some(rows) = state.get_mut("players").and_then(Value::as_array_mut) else { return; };
+    for (id, sources) in taken {
+        if rows.iter().any(|row| row["id"].as_u64() == Some(u64::from(*id))) { continue; }
+        let actor = actors.get(id);
+        let class = actor.and_then(|info| info.actor_class.as_deref()).unwrap_or("");
+        let (class_id, class_name) = class_info(class, lang);
+        let class_icon = class_id.map(|_| format!("aion2/class/{}.png", class.to_ascii_lowercase()));
+        let mut row = json!({"id": id, "name": actor.and_then(|info| info.actor_name.as_deref()), "classId": class_id, "className": class_name,
+            "classIcon": class_icon, "isSelf": self_id == Some(*id), "inParty": self_id == Some(*id) || party_ids.contains(id),
+            "isSummonOwner": owners.map(|set| set.contains(id)), "damage": 0, "dps": 0.0, "share": 0.0,
+            "hits": 0, "critRate": null, "maxHit": 0, "cp": actor.and_then(|info| info.combat_power), "deaths": 0,
+            "healTotal": 0, "hps": 0.0});
+        add_damage_taken(&mut row, sources);
+        rows.push(row);
+    }
+}
+
 fn fight_state(id: String, active: bool, target: Option<&TargetInfo>,
     stats: &HashMap<u32, PlayerOverviewStat>, self_id: Option<u32>, owners: Option<&HashSet<u32>>,
-    party_ids: &HashSet<u32>, fallback_ms: u64, lang: &str) -> Value
+    party_ids: &HashSet<u32>, fallback_ms: u64, lang: &str,
+    damage_taken: &HashMap<u32, Vec<TakenSourceStat>>) -> Value
 {
     let (started, duration) = timing(target, fallback_ms);
     let total: u64 = stats.values().map(|p| p.total_damage).sum();
     let mut players: Vec<_> = stats.values().collect();
     players.sort_by(|a, b| b.total_damage.cmp(&a.total_damage));
+    let players = players.into_iter().map(|p| {
+        let mut value = player_json(p, self_id, owners, party_ids, lang);
+        add_damage_taken(&mut value, damage_taken.get(&p.actor_id).map(Vec::as_slice).unwrap_or(&[]));
+        value
+    }).collect::<Vec<_>>();
     json!({"fightId": id, "active": active, "startedAt": started,
         "durationSec": duration, "target": target_json(target, lang), "totalDamage": total,
-        "players": players.into_iter().map(|p| player_json(p, self_id, owners, party_ids, lang)).collect::<Vec<_>>()})
+        "players": players})
 }
 
 fn current_target(snapshot: &CombatSnapshot) -> Option<u32> {
@@ -589,9 +653,12 @@ fn current_state(snapshot: Option<&CombatSnapshot>, owners: &HashSet<u32>, party
     let target = snapshot.combat_infos.target_infos.get(&id);
     let fallback = (snapshot.combat_infos.time_now * 1000.0) as u64;
     let (started, _) = timing(target, fallback);
+    let taken = snapshot.damage_taken_by_target.get(&id).cloned().unwrap_or_default();
     let mut state = fight_state(format!("{id}-{started}"), true, target,
         &snapshot.by_target_player_stats[&id], snapshot.combat_infos.main_actor_id,
-        Some(owners), party_ids, fallback, lang);
+        Some(owners), party_ids, fallback, lang, &taken);
+    add_taken_only_players(&mut state, &taken, &snapshot.combat_infos.actor_infos,
+        snapshot.combat_infos.main_actor_id, Some(owners), party_ids, lang);
     let boss = snapshot.by_target_player_stats.keys()
         .filter_map(|tid| snapshot.combat_infos.target_infos.get(tid).filter(|t| t.is_boss && t.target_mob_code.is_some()))
         .max_by(|a, b| {
@@ -606,8 +673,11 @@ fn current_state(snapshot: Option<&CombatSnapshot>, owners: &HashSet<u32>, party
 
 fn record_state(record: &HistoryRecord, current_party_ids: &HashSet<u32>, lang: &str) -> Value {
     let party_ids = record.party_member_ids.as_ref().unwrap_or(current_party_ids);
-    fight_state(record.id.clone(), false, record.target_info.as_ref(), &record.player_stats,
-        record.combat_infos.main_actor_id, record.summon_owner_ids.as_ref(), party_ids, record.created_at, lang)
+    let mut state = fight_state(record.id.clone(), false, record.target_info.as_ref(), &record.player_stats,
+        record.combat_infos.main_actor_id, record.summon_owner_ids.as_ref(), party_ids, record.created_at, lang, &record.damage_taken);
+    add_taken_only_players(&mut state, &record.damage_taken, &record.combat_infos.actor_infos,
+        record.combat_infos.main_actor_id, record.summon_owner_ids.as_ref(), party_ids, lang);
+    state
 }
 
 fn history_row(record: &HistoryRecord, current_party_ids: &HashSet<u32>, lang: &str) -> Value {
@@ -616,7 +686,7 @@ fn history_row(record: &HistoryRecord, current_party_ids: &HashSet<u32>, lang: &
     let party_ids = record.party_member_ids.as_ref().unwrap_or(current_party_ids);
     let mut players: Vec<_> = record.player_stats.values().collect();
     players.sort_by(|a, b| b.total_damage.cmp(&a.total_damage));
-    json!({"fightId": record.id, "startedAt": started, "durationSec": duration,
+    let mut row = json!({"fightId": record.id, "startedAt": started, "durationSec": duration,
         "target": record.target_info.as_ref().and_then(|t| target_name(t, lang)),
         "isBoss": record.target_info.as_ref().and_then(|t| t.target_mob_code.map(|_| t.is_boss)),
         "totalDamage": record.total_damage, "selfDps": self_stat.map(|s| s.dps),
@@ -624,8 +694,15 @@ fn history_row(record: &HistoryRecord, current_party_ids: &HashSet<u32>, lang: &
         "healTotal": record.player_stats.values().map(|p| p.heal_total).sum::<u64>(),
         "hps": self_stat.map(|s| s.hps), "deaths": record.player_stats.values().map(|p| p.deaths).sum::<u32>(),
         "selfCp": self_stat.and_then(|s| s.combat_power), "selfDeaths": self_stat.map(|s| s.deaths),
-        "players": players.into_iter().map(|player| player_json(player, record.combat_infos.main_actor_id,
-            record.summon_owner_ids.as_ref(), party_ids, lang)).collect::<Vec<_>>()})
+        "mapId": null,
+        "players": players.into_iter().map(|player| {
+            let mut value = player_json(player, record.combat_infos.main_actor_id, record.summon_owner_ids.as_ref(), party_ids, lang);
+            add_damage_taken(&mut value, record.damage_taken.get(&player.actor_id).map(Vec::as_slice).unwrap_or(&[]));
+            value
+        }).collect::<Vec<_>>()});
+    add_taken_only_players(&mut row, &record.damage_taken, &record.combat_infos.actor_infos,
+        record.combat_infos.main_actor_id, record.summon_owner_ids.as_ref(), party_ids, lang);
+    row
 }
 
 fn fight_timeline(fight: &SelectedFight, player: u32) -> Option<Value> {
@@ -673,6 +750,119 @@ fn fight_timeline(fight: &SelectedFight, player: u32) -> Option<Value> {
         rows_out
     }).unwrap_or_default();
     Some(json!({"durationMs":duration_ms,"damagePerSecond":per_second,"casts":casts,"buffs":own_buffs}))
+}
+
+fn fight_bounds(fight: &SelectedFight) -> (u64, u64) {
+    let (target, fallback) = match fight {
+        SelectedFight::Current(snapshot, target, _) => (snapshot.combat_infos.target_infos.get(target), (snapshot.combat_infos.time_now * 1000.0) as u64),
+        SelectedFight::History(record) => (record.target_info.as_ref(), record.created_at),
+    };
+    let start = target.and_then(|t| t.target_start_time.values().copied().reduce(f64::min)).map(|v| (v * 1000.0) as u64).unwrap_or(fallback);
+    let end = target.and_then(|t| t.target_last_time.values().copied().reduce(f64::max)).map(|v| (v * 1000.0) as u64).unwrap_or(fallback).max(start);
+    (start, end.min(start.saturating_add(1_200_000)))
+}
+
+fn taken_for(fight: &SelectedFight, player: u32, meter: &DpsMeter, lang: &str) -> Value {
+    let sources = match fight {
+        SelectedFight::Current(snapshot, target, _) => snapshot.damage_taken_by_target.get(target).and_then(|p| p.get(&player)).cloned().unwrap_or_default(),
+        SelectedFight::History(record) => record.damage_taken.get(&player).cloned().unwrap_or_default(),
+    };
+    let total = sources.iter().map(|source| source.damage).sum::<u64>();
+    json!({"player": player, "damageTaken": total, "sources": sources.into_iter().map(|s| json!({
+        "npcId": s.npc_id, "npcName": s.npc_id.and_then(|id| (lang == "en").then(|| meter.mob_name(id)).flatten()),
+        "sourceId": s.source_id, "sourceName": s.source_name,
+        "skillCode": s.skill_code, "damage": s.damage
+    })).collect::<Vec<_>>()})
+}
+
+fn deaths_for(fight: &SelectedFight) -> Value {
+    let (recaps, start) = match fight {
+        SelectedFight::Current(snapshot, target, _) => (snapshot.death_recaps_by_target.get(target).cloned().unwrap_or_default(), fight_bounds(fight).0),
+        SelectedFight::History(record) => (record.death_recaps.clone(), fight_bounds(fight).0),
+    };
+    json!(recaps.into_iter().map(|death| json!({
+        "player": death.player_id, "at": death.at_ms.saturating_sub(start),
+        "events": death.events.into_iter().map(|event| json!({
+            "type": event.kind, "sourceId": event.source_id, "sourceName": event.source_name,
+            "skill": event.skill_code, "amount": event.amount, "crit": event.crit,
+            "at": event.at_ms.saturating_sub(start), "hpAfter": event.hp_after
+        })).collect::<Vec<_>>()
+    })).collect::<Vec<_>>())
+}
+
+fn buffs_for_all(fight: &SelectedFight) -> Value {
+    let (mut player_ids, intervals, actors) = match fight {
+        SelectedFight::Current(snapshot, target, _) => {
+            let mut ids: Vec<u32> = snapshot.by_target_player_stats.get(target).map(|rows| rows.keys().copied().collect()).unwrap_or_default();
+            if let Some(taken) = snapshot.damage_taken_by_target.get(target) { ids.extend(taken.keys().copied()); }
+            if let Some(deaths) = snapshot.death_recaps_by_target.get(target) { ids.extend(deaths.iter().map(|death| death.player_id)); }
+            (ids, snapshot.buff_intervals.clone(), &snapshot.combat_infos.actor_infos)
+        }
+        SelectedFight::History(record) => {
+            let mut ids: Vec<u32> = record.player_stats.keys().copied().collect();
+            ids.extend(record.damage_taken.keys().copied());
+            ids.extend(record.death_recaps.iter().map(|death| death.player_id));
+            (ids, record.buff_intervals.clone(), &record.combat_infos.actor_infos)
+        }
+    };
+    let (start, end) = fight_bounds(fight);
+    player_ids.extend(intervals.iter().filter_map(|(id, sources)| {
+        if !actors.get(id).is_some_and(|actor| actor.actor_name.is_some() || actor.actor_class.is_some()) { return None; }
+        sources.values().flat_map(|skills| skills.values()).flatten()
+            .any(|span| span.start_ms < end && span.end_ms > start).then_some(*id)
+    }));
+    player_ids.sort_unstable();
+    player_ids.dedup();
+    let duration = end.saturating_sub(start).max(1) as f64;
+    let players: Vec<Value> = player_ids.into_iter().map(|player_id| {
+        let mut by_code: HashMap<u32, (Vec<(u64,u64,u32)>, Vec<u32>)> = HashMap::new();
+        if let Some(skills) = intervals.get(&player_id) {
+            for (source_id, codes) in skills {
+                for (code, spans) in codes {
+                    let entry = by_code.entry(*code).or_default();
+                    for span in spans {
+                        let a = span.start_ms.max(start);
+                        let b = span.end_ms.min(end);
+                        if b > a {
+                            entry.0.push((a,b,*source_id));
+                            if !entry.1.contains(source_id) { entry.1.push(*source_id); }
+                        }
+                    }
+                }
+            }
+        }
+        let mut buffs = Vec::new();
+        for (code, (mut spans, mut sources)) in by_code {
+            spans.sort_unstable(); sources.sort_unstable();
+            let applications = spans.len();
+            let intervals_json: Vec<_> = spans.iter().map(|(a,b,source)| json!({
+                "start": a.saturating_sub(start), "end": b.saturating_sub(start), "sourceId": source
+            })).collect();
+            let mut covered = 0u64;
+            let mut active: Option<(u64,u64)> = None;
+            for (a,b,_) in spans {
+                match active {
+                    Some((left,right)) if a <= right => active = Some((left, right.max(b))),
+                    Some((left,right)) => { covered = covered.saturating_add(right-left); active = Some((a,b)); },
+                    None => active = Some((a,b)),
+                }
+            }
+            if let Some((left,right)) = active { covered = covered.saturating_add(right-left); }
+            buffs.push(json!({"code": code, "uptime": (covered as f64 / duration).clamp(0.0,1.0),
+                "applications": applications, "sourceIds": sources, "intervals": intervals_json}));
+        }
+        buffs.sort_by(|a,b| a["code"].as_u64().cmp(&b["code"].as_u64()));
+        json!({"id": player_id, "buffs": buffs})
+    }).collect();
+    json!({"players": players})
+}
+
+fn boss_casts_for(fight: &SelectedFight) -> Value {
+    let (casts, start) = match fight {
+        SelectedFight::Current(snapshot, target, _) => (snapshot.boss_casts_by_target.get(target).cloned().unwrap_or_default(), fight_bounds(fight).0),
+        SelectedFight::History(record) => (record.boss_casts.clone(), fight_bounds(fight).0),
+    };
+    json!(casts.into_iter().map(|cast: BossCast| json!({"npcId": cast.npc_id, "skill": cast.skill, "at": cast.at_ms.saturating_sub(start)})).collect::<Vec<_>>())
 }
 
 fn skill_names() -> &'static HashMap<String, String> {

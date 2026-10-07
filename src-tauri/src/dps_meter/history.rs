@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::dps_meter::models::combat::{
-    BuffInterval, BuffSummary, CombatEvent, CombatInfos, CombatSnapshot, PlayerOverviewStat, SkillStats, TargetInfo,
+    BossCast, DeathRecap, TakenSourceStat, BuffInterval, BuffSummary, CombatEvent, CombatInfos, CombatSnapshot, PlayerOverviewStat, SkillStats, TargetInfo,
 };
 
 const MAGIC: &[u8; 4] = b"DPSH";
@@ -39,6 +39,12 @@ pub struct HistoryRecord {
     pub combat_events: Vec<CombatEvent>,
     #[serde(default)]
     pub buff_intervals: HashMap<u32, HashMap<u32, HashMap<u32, Vec<BuffInterval>>>>,
+    #[serde(default)]
+    pub damage_taken: HashMap<u32, Vec<TakenSourceStat>>,
+    #[serde(default)]
+    pub death_recaps: Vec<DeathRecap>,
+    #[serde(default)]
+    pub boss_casts: Vec<BossCast>,
 }
 
 // =============================================================================
@@ -144,6 +150,8 @@ impl HistoryStore {
 
                 let relevant_buff_targets: HashSet<u32> = std::iter::once(target_id)
                     .chain(player_stats.keys().copied())
+                    .chain(snapshot.damage_taken_by_target.get(&target_id).into_iter().flat_map(|players| players.keys().copied()))
+                    .chain(snapshot.death_recaps_by_target.get(&target_id).into_iter().flat_map(|deaths| deaths.iter().map(|death| death.player_id)))
                     .collect();
                 let use_buffs_by_target = snapshot
                     .use_buffs_by_target
@@ -189,6 +197,9 @@ impl HistoryStore {
                         .filter(|event| event.target_id == target_id && event.at_ms >= started_ms && event.at_ms <= started_ms.saturating_add(1_200_000))
                         .take(25_000).cloned().collect(),
                     buff_intervals: snapshot.buff_intervals.iter().filter(|(buff_target, _)| relevant_buff_targets.contains(buff_target)).map(|(target, actors)| (*target, actors.clone())).collect(),
+                    damage_taken: snapshot.damage_taken_by_target.get(&target_id).cloned().unwrap_or_default(),
+                    death_recaps: snapshot.death_recaps_by_target.get(&target_id).cloned().unwrap_or_default(),
+                    boss_casts: snapshot.boss_casts_by_target.get(&target_id).cloned().unwrap_or_default(),
                 })
             })
             .collect()

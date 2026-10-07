@@ -487,6 +487,9 @@ impl DpsMeter {
             main_actor_dealt_player_overview_stats: Vec::new(),
             combat_events: Vec::new(),
             buff_intervals: HashMap::new(),
+            damage_taken_by_target: HashMap::new(),
+            death_recaps_by_target: HashMap::new(),
+            boss_casts_by_target: HashMap::new(),
         };
         let _ = self.app.emit("dps-snapshot", empty);
     }

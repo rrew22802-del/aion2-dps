@@ -205,45 +205,7 @@ impl StreamProcessor {
         offset_after_opcode: usize,
         _is_compressed_bundle: bool,
     ) -> bool {
-        let mut offset = offset_after_opcode;
-
-        if packet.len() < offset {
-            return false;
-        }
-
-        let target_id_info = read_varint(packet, offset);
-        if !target_id_info.is_valid() || target_id_info.value < 100 {
-            return false;
-        }
-        offset += target_id_info.length;
-
-        let target_id = target_id_info.value as u32;
-        let skip_1 = read_varint(packet, offset);
-        if !skip_1.is_valid() {
-            return false;
-        }
-        offset += skip_1.length;
-
-        let skip_2 = read_varint(packet, offset);
-        if !skip_2.is_valid() {
-            return false;
-        }
-        offset += skip_2.length;
-
-        let skip_3 = read_varint(packet, offset);
-        if !skip_3.is_valid() {
-            return false;
-        }
-        offset += skip_3.length;
-
-        if offset + 4 > packet.len() {
-            return false;
-        }
-
-        let target_hp = parse_u32_le(packet, offset);
-        if target_hp > 1_000_000_000 {
-            return false;
-        }
+        let Some((target_id, target_hp)) = parse_remain_hp_fields(packet, offset_after_opcode) else { return false; };
 
         // Mark as possible boss if HP exceeds threshold
         const POSSIBLE_BOSS_HP_THRESHOLD: u32 = 10_000_000;
@@ -261,6 +223,9 @@ impl StreamProcessor {
             && self.data_storage.get_mob_code(target_id).is_none();
 
         if is_target_player {
+            let at_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64).unwrap_or_default();
+            self.data_storage.record_player_hp(target_id, target_hp, at_ms);
             if target_hp == 0 {
                 let (newly_dead, killer) = self.data_storage.mark_player_dead(target_id);
                 if newly_dead {
@@ -448,5 +413,32 @@ impl StreamProcessor {
         }
 
         None
+    }
+}
+
+fn parse_remain_hp_fields(packet: &[u8], offset_after_opcode: usize) -> Option<(u32, u32)> {
+    let mut offset = offset_after_opcode;
+    let id = read_varint(packet, offset);
+    if !id.is_valid() || id.value < 100 { return None; }
+    offset += id.length;
+    for _ in 0..3 {
+        let value = read_varint(packet, offset);
+        if !value.is_valid() { return None; }
+        offset += value.length;
+    }
+    if offset + 4 > packet.len() { return None; }
+    let hp = parse_u32_le(packet, offset);
+    (hp <= 1_000_000_000).then_some((id.value as u32, hp))
+}
+
+#[cfg(test)]
+mod death_capture_tests {
+    use super::parse_remain_hp_fields;
+
+    #[test]
+    fn decodes_captured_zero_hp_update() {
+        // Captured 00 8D zero-HP form recorded in docs/PACKETS-cp-deaths.md.
+        let packet = [0x00, 0x8D, 0x8C, 0x95, 0x04, 0x02, 0x01, 0, 0, 0, 0, 0];
+        assert_eq!(parse_remain_hp_fields(&packet, 2), Some((68_236, 0)));
     }
 }

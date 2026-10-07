@@ -187,6 +187,45 @@ pub struct CombatEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TakenSourceStat {
+    pub source_id: u32,
+    pub npc_id: Option<u32>,
+    pub source_name: Option<String>,
+    pub skill_code: u32,
+    pub damage: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecapEvent {
+    pub kind: String,
+    pub source_id: u32,
+    pub source_name: Option<String>,
+    pub skill_code: u32,
+    pub amount: u64,
+    pub crit: bool,
+    pub at_ms: u64,
+    pub hp_after: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeathRecap {
+    pub player_id: u32,
+    pub at_ms: u64,
+    pub events: Vec<RecapEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BossCast {
+    pub npc_id: u32,
+    pub skill: u32,
+    pub at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PvpDamageOverviewStat {
     pub player_id: u32,
     pub player_name: String,
@@ -222,4 +261,10 @@ pub struct CombatSnapshot {
     pub combat_events: Vec<CombatEvent>,
     #[serde(default, skip_serializing)]
     pub buff_intervals: HashMap<u32, HashMap<u32, HashMap<u32, Vec<BuffInterval>>>>,
+    #[serde(default)]
+    pub damage_taken_by_target: HashMap<u32, HashMap<u32, Vec<TakenSourceStat>>>,
+    #[serde(default)]
+    pub death_recaps_by_target: HashMap<u32, Vec<DeathRecap>>,
+    #[serde(default)]
+    pub boss_casts_by_target: HashMap<u32, Vec<BossCast>>,
 }

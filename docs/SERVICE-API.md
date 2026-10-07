@@ -12,7 +12,7 @@ The server listens only on `127.0.0.1:<port>`. The token must be nonempty ASCII.
 
 | Method | Path | Response |
 | --- | --- | --- |
-| GET | `/v1/health` | `{ "version": "2.7.0", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
+| GET | `/v1/health` | `{ "version": "2.8.0", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
 | GET | `/v1/state` | Current fight (shape below). When idle: `fightId`, `startedAt`, and `target` are `null`; `active` is `false`, numbers are zero, and `players` is empty. |
 | GET | `/v1/party` | `{ "members": [{"id": 16450, "name": "…", "class": "GLADIATOR"}], "updatedAt": 1790000000000 }` current known party members. |
 | GET | `/v1/nearby` | `{ "self": {"x": null, "y": null, "z": null}, "players": [...] }` recent visible players; order is by distance when positions are available. |
@@ -23,6 +23,10 @@ The server listens only on `127.0.0.1:<port>`. The token must be nonempty ASCII.
 | GET | `/v1/players/{id}?fight=current` | Player detail for the current target. A live or archived `fightId` can replace `current`. |
 | GET | `/v1/players/{id}/buffs?fight=current` | Player and boss buff uptime for the current or an archived fight. |
 | GET | `/v1/fights/{fightId}/timeline?player={id}` | One-second player/group damage, player's casts, and available buff intervals. `fightId` may be `current`. |
+| GET | `/v1/fights/{fightId}/taken?player={id}` | Damage received by that player, grouped by observed source entity/NPC and skill code. |
+| GET | `/v1/fights/{fightId}/deaths` | Death events and up to the last ten decoded incoming hits/heals for each death. |
+| GET | `/v1/fights/{fightId}/buffs` | Buff intervals summarized per fight player and skill, with coverage uptime and observed appliers. |
+| GET | `/v1/fights/{fightId}/boss-casts` | Observed skill codes used by NPC sources during the fight, with offsets. |
 | GET | `/v1/pvp` | PvP kill stats and current fight's damage dealt/taken lists. |
 | POST | `/v1/pvp/clear` | Clears the engine's accumulated PvP kill stats; returns `{}`. |
 | GET | `/v1/pvp/watch` | Service watch names and current HP of matching players. |
@@ -52,13 +56,21 @@ For a tracker-hosted tab, launch the executable separately with `--embedded --pa
   "players": [{
     "id": 16450, "name": "…", "classId": 2, "className": "Gladiator", "classIcon": "aion2/class/gladiator.png",
     "isSelf": true, "inParty": true, "isSummonOwner": false, "damage": 34567,
-    "dps": 812.3, "share": 0.28, "hits": 140, "critRate": 0.31, "maxHit": 5120,
+    "dps": 812.3, "share": 0.28, "hits": 140, "critRate": 0.31, "maxHit": 5120, "damageTaken": 2100,
     "cp": 18452, "deaths": 0, "healTotal": 9200, "hps": 216.5
   }]
 }
 ```
 
-`/v1/state` and archived fight players also expose `cp` (combat power, or `null` when not observed), `deaths`, `healTotal`, `hps`, and `inParty`. `inParty` is true for the main character and members in the latest known party roster; for other players it remains false because no party-only membership packet has been confirmed. Archived records preserve the roster captured when the fight was saved. `/v1/history` rows include a `players` array with the same `inParty` field. `GET /v1/party` returns the current roster; `updatedAt` is Unix milliseconds or `null` before the first update. A party roster is cleared when the main character changes and refreshed by local-character identity updates. `45 37` is not confirmed as a leave action and does not remove a member; `45 38` remains provisional. Alliance membership is not distinguished by the observed packet data, so this endpoint describes the party only. Healing totals cover healing packets with a decoded amount and are counted across targets; HPS divides by that player's observed fight duration. A packet without an amount contributes nothing.
+`/v1/state` and archived fight players also expose `cp` (combat power, or `null` when not observed), `deaths`, `healTotal`, `hps`, `damageTaken`, and `inParty`. `damageTaken` sums decoded non-healing combat amounts directed at the player and associated with the current fight target; source detail is available from `/v1/fights/{fightId}/taken?player={id}`. The association uses the latest observed player target because the packet does not itself carry the encounter target. `inParty` is true for the main character and members in the latest known party roster; for other players it remains false because no party-only membership packet has been confirmed. Archived records preserve the roster captured when the fight was saved. `/v1/history` rows include a `players` array with the same `inParty` field. `mapId` is `null` in history until a confirmed dungeon/map identity packet is decoded. `GET /v1/party` returns the current roster; `updatedAt` is Unix milliseconds or `null` before the first update. A party roster is cleared when the main character changes and refreshed by local-character identity updates. `45 37` is not confirmed as a leave action and does not remove a member; `45 38` remains provisional. Alliance membership is not distinguished by the observed packet data, so this endpoint describes the party only. Healing totals cover healing packets with a decoded amount and are counted across targets; HPS divides by that player's observed fight duration. A packet without an amount contributes nothing.
+
+`GET /v1/fights/{fightId}/taken?player={id}` returns `{ "player": 16450, "damageTaken": 2100, "sources": [{"npcId":2400017,"npcName":"…","sourceId":9001,"sourceName":"…","skillCode":11010000,"damage":2100}] }`. `npcId` and `npcName` use the NPC catalogue when the source entity is known as an NPC; name is `null` with Russian locale or when no catalogue entry is available. Player or unresolved sources have `null` NPC fields. `sourceName` is the observed actor name when available. Skill is the exact decoded skill code. This list is capped at 128 distinct source/skill pairs per player and fight.
+
+`GET /v1/fights/{fightId}/deaths` returns `[{"player":16450,"at":42000,"events":[{"type":"hit","sourceId":9001,"sourceName":"…","skill":11010000,"amount":2100,"crit":true,"at":39500,"hpAfter":null}]}]`. Offsets are milliseconds from fight start. Each player's rolling recap retains ten decoded hit/heal events; up to 128 deaths are retained per fight. Heals are included only when the existing healing parser supplies an amount. HP after an event is `null` unless a health update can be associated with that event.
+
+`GET /v1/fights/{fightId}/buffs` returns `{ "players": [{"id":16450,"buffs":[{"code":11010000,"uptime":0.75,"applications":2,"sourceIds":[16451],"intervals":[{"start":1000,"end":16000,"sourceId":16451}]}]}] }`. Interval offsets are milliseconds from fight start. Uptime is the union of observed buff intervals clipped to the fight window, divided by its duration (max 20 minutes); `sourceIds` contains observed appliers. `applications` counts saved intervals after the parser's existing near-overlap merge. Each interval list retains at most 1,024 intervals per target/source/skill, matching the existing bounded buff store.
+
+`GET /v1/fights/{fightId}/boss-casts` returns `[{"npcId":2400017,"skill":11010000,"at":12500}]`. It records skill-bearing damage packets whose decoded source entity is already identified as an NPC; it does not infer cast start times from damage animations. Up to 5,000 entries are retained per fight.
 
 `GET /v1/fights/{fightId}/timeline?player={id}` returns `{ "durationMs", "damagePerSecond": [{"offsetMs", "playerDamage", "groupDamage"}], "casts": [{"offsetMs", "skillCode", "damage", "crit"}], "buffs": [{"startOffsetMs", "endOffsetMs", "skillCode", "sourceId"}] }`. Resolution and included duration are capped at 20 minutes (1,200 one-second buckets); casts are capped at 25,000. Buff intervals are returned when the existing buff parser stored them. An unknown fight or player returns 404; a missing or invalid player query returns 400.
 
@@ -97,6 +109,6 @@ Each skill also has `icon` (an asset path such as `aion2/skill/1101.png`), `spec
 
 When capture starts after login, 20 or more `00 8D` packets can identify the local player if one entity accounts for at least 60% of them. The login packet remains authoritative when received later. Class inference uses the existing skill-ID prefix table when a job byte is unavailable; unrecognized classes stay `null`.
 
-History rows are `{ "fightId", "startedAt", "durationSec", "target", "isBoss", "totalDamage", "selfDps", "selfShare", "healTotal", "hps", "deaths", "selfCp", "selfDeaths", "players" }`. Each player row includes `inParty`. `healTotal` and `deaths` are group totals; the `self*` fields refer to the main character when known. History is the existing engine history; it saves fights over 1,000,000 damage and retains up to 500 records. A reset may therefore produce no history row.
+History rows are `{ "fightId", "startedAt", "durationSec", "target", "mapId", "isBoss", "totalDamage", "selfDps", "selfShare", "healTotal", "hps", "deaths", "selfCp", "selfDeaths", "players" }`. `mapId` is nullable and remains `null` unless a reliable map source becomes available. Each player row includes `inParty` and `damageTaken`. `healTotal` and `deaths` are group totals; the `self*` fields refer to the main character when known. History is the existing engine history; it saves fights over 1,000,000 damage and retains up to 500 records. A reset may therefore produce no history row.
 
 Player names come from captured game data. English target names come from the bundled NPC catalogue and English skill names from the same catalogue used by the overlays. The existing project has no Russian NPC or skill catalogue. With `--lang ru`, class names are Russian and target/skill names without a Russian entry are `null` on the existing fight and detail routes; `/v1/live` uses empty strings for missing skill names and `null` for target names. The English catalogue is not mislabeled as Russian. All numeric measurements and IDs are language independent.

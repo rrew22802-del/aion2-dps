@@ -220,6 +220,7 @@ fn build_combat_snapshot(
         max_player_count,
     );
 
+    let (damage_taken_by_target, death_recaps_by_target, boss_casts_by_target) = data_storage.extended_fight_snapshot();
     Some(CombatSnapshot {
         total_damage,
         by_target_player_skill_stats: filtered_skill_stats,
@@ -242,6 +243,9 @@ fn build_combat_snapshot(
         buff_intervals: data_storage.buff_intervals_snapshot().into_iter().map(|(target, actors)|
             (target, actors.into_iter().map(|(actor, skills)| (actor, skills.into_iter().map(|(skill, intervals)| (skill, intervals.into_iter().collect())).collect())).collect())
         ).collect(),
+        damage_taken_by_target,
+        death_recaps_by_target,
+        boss_casts_by_target,
     })
 }
 
