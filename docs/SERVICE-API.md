@@ -12,7 +12,7 @@ The server listens only on `127.0.0.1:<port>`. The token must be nonempty ASCII.
 
 | Method | Path | Response |
 | --- | --- | --- |
-| GET | `/v1/health` | `{ "version": "2.8.0", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
+| GET | `/v1/health` | `{ "version": "2.9.0", "capture": "ok"|"no-driver"|"no-admin"|"starting", "message": "…", "game": true, "pingMs": 123 }` |
 | GET | `/v1/state` | Current fight (shape below). When idle: `fightId`, `startedAt`, and `target` are `null`; `active` is `false`, numbers are zero, and `players` is empty. |
 | GET | `/v1/party` | `{ "members": [{"id": 16450, "name": "…", "class": "GLADIATOR"}], "updatedAt": 1790000000000 }` current known party members. |
 | GET | `/v1/nearby` | `{ "self": {"x": null, "y": null, "z": null}, "players": [...] }` recent visible players; order is by distance when positions are available. |
@@ -51,7 +51,7 @@ For a tracker-hosted tab, launch the executable separately with `--embedded --pa
   "active": true,
   "startedAt": 1790000000000,
   "durationSec": 42.5,
-  "target": { "name": "…", "npcId": 2400017, "isBoss": true, "hpPct": 37.5 },
+  "target": { "name": "…", "npcId": 2400017, "isBoss": true, "hpPct": 37.5, "hp": 37500000, "maxHp": null },
   "totalDamage": 123456,
   "players": [{
     "id": 16450, "name": "…", "classId": 2, "className": "Gladiator", "classIcon": "aion2/class/gladiator.png",
@@ -61,6 +61,12 @@ For a tracker-hosted tab, launch the executable separately with `--embedded --pa
   }]
 }
 ```
+
+Since 2.9.0, the `target` object in `/v1/state` and `/v1/history/{fightId}` also contains nullable integers `hp` (latest decoded current HP) and `maxHp` (decoded absolute maximum HP). Unknown values are `null`; a decoded zero remains `0`. These are additive optional fields for clients. They are also present in the state route's `boss.target` and `/v1/targets` entries, including pinned targets. When no target exists, the whole `target` remains `null`.
+
+The current HP decoder handles opcode `00 8D`: entity ID varint, three unknown varints, then current HP as little-endian `u32`. It does not decode an absolute maximum. Therefore current builds report `maxHp: null` even when `hpPct` is available. The existing `hpPct` behavior is preserved: its denominator is the highest observed current HP, an estimate that may start below the real maximum when capture starts mid-fight. Neither an observed peak nor `hp / hpPct` is used to populate `maxHp`. If only a percentage is available, both absolute fields remain `null`.
+
+Archived records store the decoded values in `targetInfo.packetHp: {"hp": ..., "maxHp": ...}` and the corresponding `combatInfos.targetInfos` entry. The internal legacy `targetInfo.maxHp` remains the observed peak for existing overlays and percentage calculations; it is **not** the new service `target.maxHp`. Old archives without `packetHp` still load: their packet-decoded `currentHp` supplies service `hp`, while service `maxHp` remains `null`. New archives capture HP at save time and retain it when loaded. The archive format version remains unchanged because the new metadata is optional.
 
 `/v1/state` and archived fight players also expose `cp` (combat power, or `null` when not observed), `deaths`, `healTotal`, `hps`, `damageTaken`, and `inParty`. `damageTaken` sums decoded non-healing combat amounts directed at the player and associated with the current fight target; source detail is available from `/v1/fights/{fightId}/taken?player={id}`. The association uses the latest observed player target because the packet does not itself carry the encounter target. `inParty` is true for the main character and members in the latest known party roster; for other players it remains false because no party-only membership packet has been confirmed. Archived records preserve the roster captured when the fight was saved. `/v1/history` rows include a `players` array with the same `inParty` field. `mapId` is `null` in history until a confirmed dungeon/map identity packet is decoded. `GET /v1/party` returns the current roster; `updatedAt` is Unix milliseconds or `null` before the first update. A party roster is cleared when the main character changes and refreshed by local-character identity updates. `45 37` is not confirmed as a leave action and does not remove a member; `45 38` remains provisional. Alliance membership is not distinguished by the observed packet data, so this endpoint describes the party only. Healing totals cover healing packets with a decoded amount and are counted across targets; HPS divides by that player's observed fight duration. A packet without an amount contributes nothing.
 
@@ -112,3 +118,5 @@ When capture starts after login, 20 or more `00 8D` packets can identify the loc
 History rows are `{ "fightId", "startedAt", "durationSec", "target", "mapId", "isBoss", "totalDamage", "selfDps", "selfShare", "healTotal", "hps", "deaths", "selfCp", "selfDeaths", "players" }`. `mapId` is nullable and remains `null` unless a reliable map source becomes available. Each player row includes `inParty` and `damageTaken`. `healTotal` and `deaths` are group totals; the `self*` fields refer to the main character when known. History is the existing engine history; it saves fights over 1,000,000 damage and retains up to 500 records. A reset may therefore produce no history row.
 
 Player names come from captured game data. English target names come from the bundled NPC catalogue and English skill names from the same catalogue used by the overlays. The existing project has no Russian NPC or skill catalogue. With `--lang ru`, class names are Russian and target/skill names without a Russian entry are `null` on the existing fight and detail routes; `/v1/live` uses empty strings for missing skill names and `null` for target names. The English catalogue is not mislabeled as Russian. All numeric measurements and IDs are language independent.
+
+Development fixtures for absolute target HP live in `src-tauri/tests/fixtures/target-hp-state.json` and `target-hp-history-record.json`. Their nonzero numbers are synthetic contract examples, not evidence of a decoded maximum. Run `pnpm test:service-api` (or `node --test scripts/fake-service-api.test.mjs`) to test a local fake server over HTTP. `node scripts/fake-service-api.mjs` starts it on a free loopback port and prints the address. Its default token is `fake-service-token`; set `FAKE_DPS_TOKEN`, `FAKE_DPS_PORT`, and `FAKE_DPS_SCENARIO` to override. Scenarios are `hp-known`, `hp-unknown`, `percent-only`, `dead`, and `idle`. Only GET health, state, and history detail are implemented. The fake server does not capture traffic or operate the game or installed service.

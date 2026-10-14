@@ -163,6 +163,8 @@ struct DataStorageInner {
     actor_id_skill_spec_map: BoundedMap<u32, HashMap<u32, Vec<u32>>>,
     mob_id_code_map: BoundedMap<u32, u32>,
     mob_id_hp_map: BoundedMap<u32, (u32, u32)>,
+    target_death_at: BoundedMap<u32, f64>,
+    mob_id_max_hp_map: BoundedMap<u32,u32>,
     player_hp_map: BoundedMap<u32, PlayerHpInfo>,
     use_buffs_by_target: BoundedMap<u32, HashMap<u32, HashMap<u32, VecDeque<BuffInterval>>>>,
     own_skill_uses: HashMap<u32, (u64, u32)>,
@@ -182,6 +184,16 @@ struct DataStorageInner {
     self_packet_counts: HashMap<u32, u32>,
     self_packet_total: u32,
     main_actor_combat_power: Option<u64>,
+    /// when the game itself last told us the own power (56 36 / 33 36), unix ms; None = only an estimate so far
+    main_actor_combat_power_at: Option<u64>,
+    /// the own character came from its own profile / nickname packet, not guessed from 00 8D (owner 12.10: a guess
+    /// took another player's name and server, and the own power was saved under «KKIIC»)
+    main_actor_confirmed: bool,
+    // Retain the last confirmed profile independently of transient 00 8D guesses.
+    main_actor_profile_name: Option<String>,
+    main_actor_profile_server: Option<String>,
+    main_actor_profile_at: Option<u64>,
+    main_actor_profile_class: Option<String>,
     last_target: Option<u32>,
     last_target_by_main_actor: Option<u32>,
     last_player_target_by_main_actor: Option<u32>,
@@ -223,10 +235,12 @@ impl Default for DataStorageInner {
             actor_id_skill_spec_map: BoundedMap::new(ACTOR_METADATA_CAPACITY),
             mob_id_code_map: BoundedMap::new(MOB_METADATA_CAPACITY),
             mob_id_hp_map: BoundedMap::new(MOB_METADATA_CAPACITY),
+            mob_id_max_hp_map: BoundedMap::new(MOB_METADATA_CAPACITY),
             player_hp_map: BoundedMap::new(ACTOR_METADATA_CAPACITY),
             use_buffs_by_target: BoundedMap::new(BUFF_TARGET_CAPACITY),
             own_skill_uses: HashMap::new(),
             possible_boss_codes: HashSet::new(),
+            target_death_at: BoundedMap::new(COMBAT_TARGET_CAPACITY),
             summon_owner_map: BoundedMap::new(SUMMON_METADATA_CAPACITY),
             start_time: None,
             activity_at: None,
@@ -238,6 +252,12 @@ impl Default for DataStorageInner {
             self_packet_counts: HashMap::new(),
             self_packet_total: 0,
             main_actor_combat_power: None,
+            main_actor_combat_power_at: None,
+            main_actor_confirmed: false,
+            main_actor_profile_name: None,
+            main_actor_profile_server: None,
+            main_actor_profile_at: None,
+            main_actor_profile_class: None,
             last_target: None,
             last_target_by_main_actor: None,
             last_player_target_by_main_actor: None,
@@ -307,6 +327,12 @@ impl DataStorage {
         let self_packet_counts = inner.self_packet_counts.clone();
         let self_packet_total = inner.self_packet_total;
         let main_actor_combat_power = inner.main_actor_combat_power;
+        let main_actor_combat_power_at = inner.main_actor_combat_power_at;
+        let main_actor_confirmed = inner.main_actor_confirmed;
+        let main_actor_profile_name = inner.main_actor_profile_name.clone();
+        let main_actor_profile_server = inner.main_actor_profile_server.clone();
+        let main_actor_profile_at = inner.main_actor_profile_at;
+        let main_actor_profile_class = inner.main_actor_profile_class.clone();
         let actor_id_name_map = inner.actor_id_name_map.clone();
         let actor_id_server_map = inner.actor_id_server_map.clone();
         let actor_id_class_map = inner.actor_id_class_map.clone();
@@ -317,6 +343,7 @@ impl DataStorage {
         let nearby_players = inner.nearby_players.clone();
         let nearby_self_position = inner.nearby_self_position;
 
+        let mob_id_max_hp_map = inner.mob_id_max_hp_map.clone();
         let mob_id_code_map = inner.mob_id_code_map.clone();
         let mob_id_hp_map = inner.mob_id_hp_map.clone();
         let player_hp_map = inner.player_hp_map.clone();
@@ -334,6 +361,12 @@ impl DataStorage {
         inner.self_packet_counts = self_packet_counts;
         inner.self_packet_total = self_packet_total;
         inner.main_actor_combat_power = main_actor_combat_power;
+        inner.main_actor_combat_power_at = main_actor_combat_power_at;
+        inner.main_actor_confirmed = main_actor_confirmed;
+        inner.main_actor_profile_name = main_actor_profile_name;
+        inner.main_actor_profile_server = main_actor_profile_server;
+        inner.main_actor_profile_at = main_actor_profile_at;
+        inner.main_actor_profile_class = main_actor_profile_class;
         inner.actor_id_name_map = actor_id_name_map;
         inner.actor_id_server_map = actor_id_server_map;
         inner.actor_id_class_map = actor_id_class_map;
@@ -345,6 +378,7 @@ impl DataStorage {
         inner.nearby_self_position = nearby_self_position;
 
         inner.mob_id_code_map = mob_id_code_map;
+        inner.mob_id_max_hp_map = mob_id_max_hp_map;
         inner.mob_id_hp_map = mob_id_hp_map;
         inner.player_hp_map = player_hp_map;
         inner.pvp_attackers_by_target = pvp_attackers_by_target;
@@ -629,6 +663,12 @@ impl DataStorage {
                 .or_insert(0) += count;
         }
 
+        if inner.start_time_by_target.len() > COMBAT_TARGET_CAPACITY {
+            let retained: HashSet<u32> = inner.dps_stats.map.keys().copied().collect();
+            inner.start_time_by_target.retain(|id, _| retained.contains(id));
+            inner.last_time_by_target.retain(|id, _| retained.contains(id));
+        }
+
         if actor_id != packet.target_id {
             inner.last_target = Some(packet.target_id);
             if inner.main_actor_id == Some(actor_id) {
@@ -763,11 +803,8 @@ impl DataStorage {
             return;
         }
 
-        self.inner
-            .write()
-            .unwrap()
-            .actor_id_combat_power_map
-            .insert(actor_id, combat_power);
+        let mut inner = self.inner.write().unwrap();
+        update_actor_power(&mut inner,actor_id,combat_power);
     }
 
     pub fn save_main_actor_combat_power(&self, combat_power: u64) -> bool {
@@ -775,7 +812,10 @@ impl DataStorage {
             return false;
         }
 
-        self.inner.write().unwrap().main_actor_combat_power = Some(combat_power);
+        let mut inner = self.inner.write().unwrap();
+        inner.main_actor_combat_power = Some(combat_power);
+        inner.main_actor_combat_power_at = Some(current_timestamp_millis());
+        if let Some(id) = inner.main_actor_id { inner.actor_id_combat_power_map.insert(id, combat_power); }
         true
     }
 
@@ -789,7 +829,16 @@ impl DataStorage {
         inner.mob_id_code_map.insert(target_id, mob_code);
     }
 
+    pub fn append_mob_vitals(&self,id:u32,hp:u32,max:u32) {
+        if max==0 || hp>max {return;}
+        let mut inner=self.inner.write().unwrap();
+        inner.mob_id_max_hp_map.insert(id,max); inner.mob_id_hp_map.insert(id,(hp,max));
+        if hp == 0 { inner.target_death_at.get_mut_or_insert_with(id, current_timestamp_seconds); }
+        else { inner.target_death_at.map.remove(&id); inner.target_death_at.order.retain(|v| *v != id); }
+    }
+    pub fn mob_max_hp_snapshot(&self)->HashMap<u32,u32>{self.inner.read().unwrap().mob_id_max_hp_map.map.clone()}
     pub fn append_mob_hp(&self, target_id: u32, current_hp: u32) {
+        // 00 8D supplies only current HP. entry.1 is an observed peak, not max HP.
         let mut inner = self.inner.write().unwrap();
         let entry = inner
             .mob_id_hp_map
@@ -798,6 +847,19 @@ impl DataStorage {
         if current_hp > entry.1 {
             entry.1 = current_hp;
         }
+        if current_hp == 0 { inner.target_death_at.get_mut_or_insert_with(target_id, current_timestamp_seconds); }
+        else { inner.target_death_at.map.remove(&target_id); inner.target_death_at.order.retain(|v| *v != target_id); }
+    }
+
+    pub fn mark_target_dead(&self, id: u32, at: f64) {
+        let mut inner = self.inner.write().unwrap();
+        if !at.is_finite() || !inner.start_time_by_target.contains_key(&id) { return; }
+        inner.target_death_at.get_mut_or_insert_with(id, || at);
+        if let Some(entry) = inner.mob_id_hp_map.map.get_mut(&id) { entry.0 = 0; }
+    }
+
+    pub fn target_death_snapshot(&self) -> HashMap<u32, f64> {
+        self.inner.read().unwrap().target_death_at.as_hash_map()
     }
 
     pub fn append_player_hp(&self, actor_id: u32, current_hp: u32) {
@@ -815,10 +877,7 @@ impl DataStorage {
 
     pub fn append_summon(&self, owner_id: u32, summon_id: u32) {
         let mut inner = self.inner.write().unwrap();
-        if inner.actor_id_name_map.contains_key(&summon_id) {
-            return;
-        }
-        inner.summon_owner_map.insert(summon_id, owner_id);
+        record_summon_owner(&mut inner, owner_id, summon_id);
     }
 
     pub fn has_summon_owner(&self, summon_id: u32) -> bool {
@@ -875,11 +934,17 @@ impl DataStorage {
     pub fn set_main_actor(&self, actor_id: u32, actor_name: &str) {
         let (sid, is_new_player) = {
             let mut inner = self.inner.write().unwrap();
-            let is_new_player = (inner.main_actor_id.is_some_and(|current_id| current_id != actor_id)
-                || main_actor_changed(inner.main_actor_name.as_deref(), actor_name))
-                && !(inner.main_actor_id == Some(actor_id) && inner.main_actor_name.as_deref() == Some(""));
+            let previous_server = inner.main_actor_profile_server.as_deref();
+            let next_server = inner.actor_id_server_map.get(&actor_id).map(String::as_str);
+            let is_new_player = reset_for_identity(inner.main_actor_profile_name.as_deref(), actor_name, previous_server, next_server);
+            let confirmed_server = next_server.map(str::to_string);
+            inner.main_actor_profile_name = Some(actor_name.to_string());
+            inner.main_actor_profile_server = confirmed_server;
+            inner.main_actor_profile_at = Some(current_timestamp_millis());
+            inner.main_actor_profile_class = inner.actor_id_class_map.get(&actor_id).cloned();
             if is_new_player {
                 inner.main_actor_combat_power = None;
+                inner.main_actor_combat_power_at = None;
                 inner.nearby_self_position = None;
                 inner.party_members.map.clear();
                 inner.party_members.order.clear();
@@ -887,6 +952,9 @@ impl DataStorage {
             }
             inner.main_actor_id = Some(actor_id);
             inner.main_actor_name = Some(actor_name.to_string());
+            inner.main_actor_confirmed = true;
+            // the power reported before the character was known also becomes its fight-row power (not the 45 36 scan value)
+            if let (Some(cp), Some(_)) = (inner.main_actor_combat_power, inner.main_actor_combat_power_at) { inner.actor_id_combat_power_map.insert(actor_id, cp); }
             inner.self_packet_counts.clear();
             inner.self_packet_total = 0;
             (
@@ -930,9 +998,8 @@ impl DataStorage {
                 if inner.self_packet_total > 200 { inner.self_packet_counts.clear(); inner.self_packet_total = 0; }
                 return;
             }
-            let name = inner.actor_id_name_map.get(&inferred_id).cloned().unwrap_or_default();
-            inner.main_actor_id = Some(inferred_id);
-            inner.main_actor_name = Some(name.clone());
+            apply_own_actor_inference(&mut inner, inferred_id, current_timestamp_millis());
+            let name = inner.main_actor_name.clone().unwrap_or_default();
             inner.self_packet_counts.clear();
             inner.self_packet_total = 0;
             Some((inferred_id, name))
@@ -1010,6 +1077,15 @@ impl DataStorage {
 
     pub fn main_actor_combat_power(&self) -> Option<u64> {
         self.inner.read().unwrap().main_actor_combat_power
+    }
+
+    /// Own character for the tracker outside fights: id, name, server, power and when the game confirmed that power.
+    pub fn main_actor_profile(&self) -> Option<(u32, String, Option<String>, Option<u64>, Option<u64>)> {
+        let inner = self.inner.read().unwrap();
+        let id = inner.main_actor_id?;
+        if !inner.main_actor_confirmed { return None; } // only a character its own packets named is reported as «self»
+        Some((id, inner.main_actor_name.clone().unwrap_or_default(), inner.actor_id_server_map.get(&id).cloned(),
+            inner.main_actor_combat_power, inner.main_actor_combat_power_at))
     }
 
     pub fn actor_skill_spec_snapshot(&self) -> HashMap<u32, HashMap<u32, Vec<u32>>> {
@@ -1429,6 +1505,109 @@ fn main_actor_changed(current: Option<&str>, next: &str) -> bool {
     current != Some(next)
 }
 
+fn reset_for_identity(current: Option<&str>, next: &str, old_server: Option<&str>, new_server: Option<&str>) -> bool {
+    // Raw damage has entity IDs, so a late own profile can identify already captured hits.
+    // Changing a temporary entity ID on zone entry must not erase that first boss.
+    current.filter(|name| !name.is_empty()).is_some_and(|name| main_actor_changed(Some(name), next))
+        || old_server.zip(new_server).is_some_and(|(old, new)| !old.is_empty() && !new.is_empty() && old != new)
+}
+
+fn apply_own_actor_inference(inner: &mut DataStorageInner, id: u32, now_ms: u64) {
+    let observed_name = inner.actor_id_name_map.get(&id).cloned();
+    let observed_server = inner.actor_id_server_map.get(&id).cloned();
+    let previous_class = inner.main_actor_profile_class.clone();
+    let candidate_class = inner.actor_id_class_map.get(&id).cloned();
+    let confirmed = inner.main_actor_profile_name.as_ref().zip(inner.main_actor_profile_server.as_ref())
+        .filter(|(name, server)| !name.is_empty() && !server.is_empty())
+        .filter(|(name, server)| observed_name.as_ref().is_none_or(|other| other.is_empty() || other == *name)
+            && observed_server.as_ref().is_none_or(|other| other.is_empty() || other == *server))
+        .filter(|_| previous_class.as_ref().zip(candidate_class.as_ref()).is_none_or(|(old,new)| old == new))
+        .filter(|(name,server)| {
+            let recent = inner.main_actor_profile_at.is_some_and(|at| now_ms >= at && now_ms-at <= 30_000);
+            let named_same_character = observed_name.as_ref() == Some(*name) && observed_server.as_ref() == Some(*server);
+            recent || named_same_character
+        }).map(|(name,server)| (name.clone(),server.clone()));
+    inner.main_actor_id = Some(id);
+    inner.main_actor_confirmed = confirmed.is_some();
+    if let Some((name,server)) = confirmed {
+        inner.main_actor_name = Some(name.clone());
+        inner.actor_id_name_map.insert(id,name);
+        inner.actor_id_server_map.insert(id,server);
+        if candidate_class.is_none() { if let Some(class) = previous_class { inner.actor_id_class_map.insert(id,class); } }
+    } else {
+        inner.main_actor_name = Some(observed_name.unwrap_or_default());
+    }
+    if let (Some(cp), Some(_)) = (inner.main_actor_combat_power, inner.main_actor_combat_power_at) { inner.actor_id_combat_power_map.insert(id, cp); }
+}
+
+#[cfg(test)]
+mod own_profile_alias_tests {
+    use super::{DataStorageInner, apply_own_actor_inference};
+    #[test]
+    fn own_only_battle_id_keeps_recent_confirmed_character_and_power() {
+        let mut inner = DataStorageInner::default();
+        inner.main_actor_id = Some(11976);
+        inner.main_actor_confirmed = true;
+        inner.main_actor_profile_name = Some("Player".into());
+        inner.main_actor_profile_server = Some("2302".into());
+        inner.main_actor_profile_at = Some(1000);
+        inner.main_actor_combat_power = Some(84955);
+        inner.main_actor_combat_power_at = Some(990);
+        apply_own_actor_inference(&mut inner, 1507, 2000);
+        assert_eq!(inner.main_actor_id, Some(1507));
+        assert!(inner.main_actor_confirmed);
+        assert_eq!(inner.main_actor_name.as_deref(), Some("Player"));
+        assert_eq!(inner.actor_id_name_map.get(&1507).map(String::as_str), Some("Player"));
+        assert_eq!(inner.actor_id_server_map.get(&1507).map(String::as_str), Some("2302"));
+        assert_eq!(inner.main_actor_combat_power, Some(84955));
+    }
+    #[test]
+    fn stale_or_conflicting_profile_never_names_an_unknown_own_candidate() {
+        let mut inner = DataStorageInner::default();
+        inner.main_actor_profile_name = Some("Player".into());
+        inner.main_actor_profile_server = Some("2302".into());
+        inner.main_actor_profile_at = Some(1000);
+        apply_own_actor_inference(&mut inner, 1507, 32_000);
+        assert!(!inner.main_actor_confirmed);
+        inner.actor_id_name_map.insert(1700,"Other".into());
+        apply_own_actor_inference(&mut inner, 1700, 2000);
+        assert!(!inner.main_actor_confirmed);
+        inner.actor_id_server_map.insert(1800,"2303".into());
+        apply_own_actor_inference(&mut inner, 1800, 2000);
+        assert!(!inner.main_actor_confirmed);
+        inner.actor_id_name_map.insert(1900,"Player".into());
+        inner.actor_id_server_map.insert(1900,"2302".into());
+        apply_own_actor_inference(&mut inner, 1900, 60_000);
+        assert!(inner.main_actor_confirmed);
+    }
+    #[test]
+    fn rejected_candidate_cannot_change_the_confirmed_profile_class() {
+        let mut inner = DataStorageInner::default();
+        inner.main_actor_profile_name = Some("Player".into());
+        inner.main_actor_profile_server = Some("2302".into());
+        inner.main_actor_profile_class = Some("RANGER".into());
+        inner.main_actor_profile_at = Some(1000);
+        inner.actor_id_class_map.insert(1700,"CLERIC".into());
+        apply_own_actor_inference(&mut inner,1700,2000);
+        assert!(!inner.main_actor_confirmed);
+        inner.actor_id_class_map.insert(1507,"RANGER".into());
+        apply_own_actor_inference(&mut inner,1507,2100);
+        assert!(inner.main_actor_confirmed);
+    }
+}
+
+#[cfg(test)]
+mod encounter_identity_tests {
+    use super::reset_for_identity;
+    #[test]
+    fn late_profile_and_zone_id_change_preserve_captured_first_boss() {
+        assert!(!reset_for_identity(None, "Player", None, Some("2302")));
+        assert!(!reset_for_identity(Some("Player"), "Player", Some("2302"), Some("2302")));
+        assert!(reset_for_identity(Some("Player"), "Other", Some("2302"), Some("2302")));
+        assert!(reset_for_identity(Some("Player"), "Player", Some("2302"), Some("2303")));
+    }
+}
+
 #[cfg(test)]
 mod main_actor_tests {
     use super::{main_actor_changed, self_packet_candidate};
@@ -1539,5 +1718,70 @@ mod own_fight_tests {
     #[test]
     fn someone_else_fighting_nearby_does_not() {
         assert!(!is_own_fight(&inner(Some(ME), Some(BOSS)), STRANGER, OTHER_MOB));
+    }
+}
+
+fn record_summon_owner(inner: &mut DataStorageInner, owner_id: u32, summon_id: u32) {
+    // Every parser must retain a confirmed owner when an update has no owner.
+    if owner_id == 0 || summon_id == 0 || owner_id == summon_id
+        || inner.actor_id_name_map.contains_key(&summon_id) { return; }
+    inner.summon_owner_map.insert(summon_id, owner_id);
+}
+
+#[cfg(test)]
+mod trap_ownership_tests {
+    use super::*;
+    #[test]
+    fn ferk_delayed_trap_damage_stays_attributed_after_zero_owner_updates() {
+        let mut inner = DataStorageInner::default();
+        let mut damage = HashMap::<u32, u64>::new();
+        for (summon, initial, delayed) in [(49009, 6977, 5059), (52481, 5906, 3990), (18718, 12237, 3171)] {
+            // Captured 4136 spawn, first 14170031 hit, 048D zero owner, 14170037 hit.
+            record_summon_owner(&mut inner, 9474, summon);
+            *damage.entry(*inner.summon_owner_map.get(&summon).unwrap()).or_default() += initial;
+            record_summon_owner(&mut inner, 0, summon);
+            *damage.entry(*inner.summon_owner_map.get(&summon).unwrap()).or_default() += delayed;
+        }
+        assert_eq!(damage.get(&9474), Some(&37340));
+        assert!(!damage.contains_key(&0));
+        record_summon_owner(&mut inner, 0, 60000);
+        assert!(!inner.summon_owner_map.contains_key(&60000));
+        record_summon_owner(&mut inner, 60000, 60000);
+        assert!(!inner.summon_owner_map.contains_key(&60000));
+        record_summon_owner(&mut inner, 9474, 0);
+        assert!(!inner.summon_owner_map.contains_key(&0));
+    }
+}
+
+fn update_actor_power(inner: &mut DataStorageInner, actor_id: u32, power: u64) {
+    let own = inner.main_actor_id == Some(actor_id);
+    // owner 12.10: the 45 36 nearby list carries the own character with another number (59.4K while the game showed
+    // 75K+); once 56 36 / 33 36 reported the own power, neither the own power nor the own fight row takes the scan value
+    if own && inner.main_actor_combat_power_at.is_some() { return; }
+    inner.actor_id_combat_power_map.insert(actor_id,power);
+    if own { inner.main_actor_combat_power = Some(power); }
+}
+#[cfg(test)]
+mod power_refresh_tests {
+    use super::*;
+    #[test]
+    fn actor_observation_refreshes_own_cp_without_crossing_players() {
+        let mut inner=DataStorageInner::default(); inner.main_actor_id=Some(7); inner.main_actor_combat_power=Some(58000);
+        update_actor_power(&mut inner,7,74280);
+        assert_eq!(inner.main_actor_combat_power,Some(74280));
+        update_actor_power(&mut inner,8,99000);
+        assert_eq!(inner.main_actor_combat_power,Some(74280));
+        assert_eq!(inner.actor_id_combat_power_map.get(&7),Some(&74280));
+    }
+    #[test]
+    fn nearby_scan_does_not_override_the_power_the_game_reported() {
+        let mut inner=DataStorageInner::default(); inner.main_actor_id=Some(7);
+        inner.main_actor_combat_power=Some(75567); inner.main_actor_combat_power_at=Some(1);
+        inner.actor_id_combat_power_map.insert(7,75567);
+        update_actor_power(&mut inner,7,59292);
+        assert_eq!(inner.main_actor_combat_power,Some(75567));
+        assert_eq!(inner.actor_id_combat_power_map.get(&7),Some(&75567)); // the fight row keeps the reported power too
+        update_actor_power(&mut inner,8,59292);
+        assert_eq!(inner.actor_id_combat_power_map.get(&8),Some(&59292)); // other players still come from the scan
     }
 }

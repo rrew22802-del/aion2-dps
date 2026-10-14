@@ -215,8 +215,10 @@ impl Default for DetailSelectionStore {
 }
 
 #[tauri::command]
-pub fn get_detail_selection(state: State<'_, DetailSelectionStore>) -> Value {
-    state.0.read().unwrap().clone()
+pub async fn get_detail_selection(app: AppHandle) -> Value {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<DetailSelectionStore>().0.read().unwrap().clone()
+    }).await.unwrap_or(Value::Null)
 }
 
 #[tauri::command]
@@ -236,6 +238,8 @@ pub fn set_detail_selection(
 // =============================================================================
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
 
 static OVERLAY_LOCKED: AtomicBool = AtomicBool::new(false);
 static DPS_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -353,13 +357,21 @@ pub async fn create_dps_detail<R: Runtime>(app: AppHandle<R>) -> Result<(), Stri
 pub fn show_dps_detail<R: Runtime>(app: &AppHandle<R>, position: Option<(i32, i32)>, focus: bool) -> Result<(), String> {
     DETAIL_FOLLOW_OVERLAY.store(position.is_none(), Ordering::Relaxed);
     if let Some(window) = app.get_webview_window(DETAIL_LABEL) {
-        position_detail(app, position)?;
-        window.set_focusable(focus).map_err(|e| e.to_string())?;
-        window.show().map_err(|e| e.to_string())?;
-        if focus { window.set_focus().map_err(|e| e.to_string())?; }
-        // Reload so init() picks up latest selection from get_detail_selection()
-        let _ = window.eval("location.reload()");
-        return Ok(());
+        let app_for_ui = app.clone();
+        return run_detail_window_operation(app, "reuse", move || {
+            run_detail_step("reuse", "position", || position_detail(&app_for_ui, position))?;
+            // The detail window is always interactive, even when its caller
+            // does not ask to steal keyboard focus.
+            run_detail_step("reuse", "focusable=true", || window.set_focusable(true).map_err(|e| e.to_string()))?;
+            run_detail_step("reuse", "cursor-events=enabled", || window.set_ignore_cursor_events(false).map_err(|e| e.to_string()))?;
+            run_detail_step("reuse", "show", || window.show().map_err(|e| e.to_string()))?;
+            if focus {
+                run_detail_step("reuse", "focus", || window.set_focus().map_err(|e| e.to_string()))?;
+            }
+            let focused = window.is_focused().map_err(|e| e.to_string())?;
+            eprintln!("[dps-detail] reuse native state: focusable=true cursor-events=enabled focused={focused}");
+            Ok(())
+        });
     }
 
     let window = WebviewWindowBuilder::new(
@@ -372,17 +384,45 @@ pub fn show_dps_detail<R: Runtime>(app: &AppHandle<R>, position: Option<(i32, i3
     .transparent(true)
     .always_on_top(true)
     .focused(false)
-    .focusable(focus)
+    .focusable(true)
     .skip_taskbar(true)
     .inner_size(1080.0, 960.0)
     .resizable(true)
     .visible(false)
+    .on_page_load(|_, payload| {
+        eprintln!("[dps-detail] page-load: {:?}", payload.event());
+    })
     .build()
     .map_err(|e| e.to_string())?;
 
-    position_detail(app, position)?;
-    window.show().map_err(|e| e.to_string())?;
-    if focus { window.set_focus().map_err(|e| e.to_string())?; }
+    let app_for_ui = app.clone();
+    let window_for_ui = window.clone();
+    run_detail_window_operation(app, "create-show", move || {
+        run_detail_step("create-show", "position", || position_detail(&app_for_ui, position))?;
+        run_detail_step("create-show", "focusable=true", || window_for_ui.set_focusable(true).map_err(|e| e.to_string()))?;
+        run_detail_step("create-show", "cursor-events=enabled", || window_for_ui.set_ignore_cursor_events(false).map_err(|e| e.to_string()))?;
+
+        // Native close requests hide this child without stopping capture.
+        let close_window = window_for_ui.clone();
+        window_for_ui.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let started_at = std::time::Instant::now();
+                if let Err(error) = close_window.hide() {
+                    eprintln!("[dps-detail] native close hide failed: {error}");
+                } else {
+                    eprintln!("[dps-detail] native close hide completed in {:.1}ms", started_at.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+        });
+        run_detail_step("create-show", "show", || window_for_ui.show().map_err(|e| e.to_string()))?;
+        if focus {
+            run_detail_step("create-show", "focus", || window_for_ui.set_focus().map_err(|e| e.to_string()))?;
+        }
+        let focused = window_for_ui.is_focused().map_err(|e| e.to_string())?;
+        eprintln!("[dps-detail] create-show native state: focusable=true cursor-events=enabled focused={focused}");
+        Ok(())
+    })?;
 
     // Track overlay movement only in follow mode
     if position.is_none() && get_detail_window_mode(app) == "follow" {
@@ -400,6 +440,52 @@ pub fn show_dps_detail<R: Runtime>(app: &AppHandle<R>, position: Option<(i32, i3
     }
 
     Ok(())
+}
+
+fn run_detail_window_operation<R, T, F>(app: &AppHandle<R>, stage: &'static str, operation: F) -> Result<T, String>
+where
+    R: Runtime,
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    // The service API calls this from its HTTP worker. Keep monitor and native
+    // window access on Tauri's UI thread, while bounding only the caller wait.
+    let scheduled_at = std::time::Instant::now();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let started_at = std::time::Instant::now();
+        let result = operation();
+        eprintln!(
+            "[dps-detail] main-thread operation {stage}: queue={:.1}ms work={:.1}ms",
+            started_at.duration_since(scheduled_at).as_secs_f64() * 1000.0,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+        let _ = sender.send(result);
+    })
+    .map_err(|error| format!("Could not schedule detail window operation: {error}"))?;
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|error| format!("Detail window operation {stage} timed out: {error}"))?
+}
+
+fn run_detail_step<T, F>(stage: &'static str, step: &'static str, operation: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+{
+    let started_at = std::time::Instant::now();
+    eprintln!("[dps-detail] {stage}.{step}: begin");
+    let result = operation();
+    match &result {
+        Ok(_) => eprintln!(
+            "[dps-detail] {stage}.{step}: ok {:.1}ms",
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        ),
+        Err(error) => eprintln!(
+            "[dps-detail] {stage}.{step}: failed {:.1}ms: {error}",
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        ),
+    }
+    result
 }
 
 fn position_detail<R: Runtime>(app: &AppHandle<R>, position: Option<(i32, i32)>) -> Result<(), String> {

@@ -37,7 +37,7 @@ const EXTERNAL_ACTIONS: ExternalAction[] = [
       <div className="flex w-[240px] flex-col gap-1.5 p-1">
         <div className="text-xs font-semibold">Built on Aether and NOIA2</div>
         <div className="text-muted-foreground text-xs leading-5">
-          DBAion2 DPS is a rebrand of Aether, itself a fork of NOIA2 by
+          TeamMate DPS is a rebrand of Aether, itself a fork of NOIA2 by
           zdyoung, which contributed the capture pipeline, the packet
           parsers, and the game-data catalogues. Licensed GPL-3.0.
         </div>
@@ -144,7 +144,7 @@ export function MainTitleBar() {
                 className="h-8 w-8 shrink-0 drop-shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
                 draggable={false}
               />
-              <span className="text-base font-semibold tracking-tight">DBAion2 DPS</span>
+              <span className="text-base font-semibold tracking-tight">TeamMate DPS</span>
             </div>
 
             <div className="flex items-center gap-1 rounded-full p-1">

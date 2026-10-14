@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::dps_meter::capture::dispatcher::TcpReassemblyStatus;
 use crate::dps_meter::capture::windivert_capturer::WinDivertStatus;
@@ -317,8 +317,15 @@ pub fn get_tcp_reassembly_status(
 }
 
 #[tauri::command]
-pub fn get_last_snapshot(meter: State<'_, DpsMeter>) -> Option<CombatSnapshot> {
-    meter.get_last_snapshot()
+pub async fn get_last_snapshot(app: AppHandle) -> Option<CombatSnapshot> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if cfg!(debug_assertions) && std::env::args().any(|arg| arg == "--detail-diagnostic")
+            && std::env::args().any(|arg| arg == "--slow-snapshot-diagnostic") {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+        app.state::<DpsMeter>().get_last_snapshot()
+    })
+        .await.ok().flatten()
 }
 
 #[tauri::command]

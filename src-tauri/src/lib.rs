@@ -30,24 +30,6 @@ fn show_system_notification(
         .map_err(|error| error.to_string())
 }
 
-/// Delete what removed features left in app data. An update installs over the
-/// old copy without running its uninstaller, so nothing else ever would.
-///
-/// `maps/` held the optional full-resolution map tiles (tens of MB per zone)
-/// and a dataset override; the map was removed in 2.2.0.
-fn remove_retired_app_data(app: &tauri::AppHandle) {
-    let Ok(dir) = app.path().app_data_dir() else {
-        return;
-    };
-    let maps = dir.join("maps");
-    if maps.is_dir() {
-        match std::fs::remove_dir_all(&maps) {
-            Ok(()) => eprintln!("[startup] removed retired map data at {}", maps.display()),
-            Err(error) => eprintln!("[startup] could not remove {}: {error}", maps.display()),
-        }
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let service = match service::Options::parse(&std::env::args().collect::<Vec<_>>()) {
@@ -136,6 +118,8 @@ pub fn run() {
             plugins::aion2_overlay::get_dps_overlay_locked,
             plugins::aion2_overlay::create_dps_log,
             plugins::aion2_overlay::create_dps_detail,
+            service::detail_diagnostic_report,
+            service::detail_diagnostic_stage,
             plugins::aion2_overlay::create_dps_settings,
             plugins::window_tracking::ensure_tracked_window,
             plugins::aion2_overlay::get_overlay_config,
@@ -179,7 +163,6 @@ pub fn run() {
                 .state::<std::sync::Arc<plugins::logger::AppLogger>>()
                 .inner()
                 .clone();
-            remove_retired_app_data(app.handle());
             let meter = dps_meter::engine::meter::DpsMeter::new(app.handle().clone(), logger);
             app.manage(meter);
 
@@ -223,6 +206,9 @@ pub fn run() {
     if service.is_some() {
         context.config_mut().app.windows.clear();
     }
+    if service.as_ref().is_some_and(|options| options.detail_diagnostic) {
+        context.config_mut().identifier.push_str(".audit");
+    }
 
     let app = builder
         .build(context)
@@ -234,8 +220,6 @@ pub fn run() {
         if let RunEvent::Exit = event {
             plugins::on_top::restore_all();
             // The meter stops on ExitRequested; this covers any other way out.
-            #[cfg(windows)]
-            dps_meter::capture::windivert_capturer::unload_driver();
             return;
         }
         if let RunEvent::ExitRequested { api, .. } = event {

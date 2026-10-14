@@ -5,3 +5,5 @@ pub(crate) mod field_boss_timer;
 pub(crate) mod nickname;
 pub(crate) mod summon;
 pub mod utils;
+
+mod npc_vitals;

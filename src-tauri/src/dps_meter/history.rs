@@ -133,14 +133,21 @@ impl HistoryStore {
         snapshot
             .by_target_player_stats
             .into_iter()
-            .filter_map(|(target_id, player_stats)| {
+            .filter_map(|(target_id, mut player_stats)| {
                 let total_damage: u64 = player_stats.values().map(|s| s.total_damage).sum();
 
                 if total_damage <= HISTORY_THRESHOLD {
                     return None;
                 }
 
-                let target_info = snapshot.combat_infos.target_infos.get(&target_id).cloned();
+                // Includes packetHp; keep decoded absolute values alongside the legacy HP peak.
+                let mut target_info = snapshot.combat_infos.target_infos.get(&target_id).cloned();
+                if let Some(info) = &mut target_info {
+                    // New archives freeze the encounter clock; legacy archives retain their damage interval.
+                    if info.elapsed_at.is_some() && info.stopped_at.is_none() { info.stopped_at = info.elapsed_at; }
+                    let seconds = info.duration_seconds().max(1.0);
+                    for player in player_stats.values_mut() { player.dps = player.total_damage as f64 / seconds; }
+                }
 
                 let skill_stats = snapshot
                     .by_target_player_skill_stats
@@ -300,5 +307,48 @@ impl HistoryStore {
                 eprintln!("[history] decompress failed: {}", e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod target_hp_tests {
+    use super::*;
+
+    #[test]
+    fn archive_preserves_packet_hp_and_reads_legacy_history() {
+        let fixture = include_str!("../../tests/fixtures/target-hp-history-record.json");
+        let record: HistoryRecord = serde_json::from_str(fixture).unwrap();
+        let snapshot = CombatSnapshot {
+            total_damage: record.total_damage,
+            by_target_player_skill_stats: HashMap::new(),
+            by_target_player_stats: HashMap::from([(record.target_id, record.player_stats.clone())]),
+            use_buffs_by_target: HashMap::new(),
+            combat_infos: record.combat_infos.clone(),
+            last_target_info: record.target_info.clone(),
+            last_target_all_players_overview_stats: Vec::new(),
+            main_actor_received_player_overview_stats: Vec::new(),
+            main_actor_dealt_player_overview_stats: Vec::new(),
+            combat_events: Vec::new(),
+            buff_intervals: HashMap::new(),
+            damage_taken_by_target: HashMap::new(),
+            death_recaps_by_target: HashMap::new(),
+            boss_casts_by_target: HashMap::new(),
+        };
+        let records = HistoryStore::extract_records(snapshot, HashSet::new(), HashSet::new());
+        assert_eq!(records.len(), 1);
+        let archived = records[0].target_info.as_ref().unwrap();
+        assert_eq!(archived.packet_hp, record.target_info.as_ref().unwrap().packet_hp);
+        let json = serde_json::to_vec(&records).unwrap();
+        let compressed = lz4_flex::compress_prepend_size(&json);
+        let decoded = lz4_flex::decompress_size_prepended(&compressed).unwrap();
+        let loaded: Vec<HistoryRecord> = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(loaded[0].target_info.as_ref().unwrap().packet_hp, archived.packet_hp);
+
+        let mut legacy: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        legacy["targetInfo"].as_object_mut().unwrap().remove("packetHp");
+        legacy["combatInfos"]["targetInfos"]["9001"].as_object_mut().unwrap().remove("packetHp");
+        let old: HistoryRecord = serde_json::from_value(legacy).unwrap();
+        assert!(old.target_info.as_ref().unwrap().packet_hp.is_none());
+        assert_eq!(old.target_info.unwrap().current_hp, Some(37_500_000));
     }
 }

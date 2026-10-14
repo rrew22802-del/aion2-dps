@@ -139,7 +139,7 @@ fn resolve_log_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     if let Ok(dir) = app.path().app_data_dir() {
         return dir.join("logs").join("aether.log");
     }
-    std::env::temp_dir().join("aether").join("aether.log")
+    std::env::temp_dir().join(&app.config().identifier).join("aether.log")
 }
 
 #[tauri::command]

@@ -19,7 +19,7 @@ i18n
     fallbackLng: "en",
     // Chinese was dropped: this build targets the global service, and every
     // remaining string is authored in English. Russian was added for
-    // dbaion2.ru's own DBAion2 DPS fork.
+    // dbaion2.ru's own TeamMate DPS fork.
     supportedLngs: ["en", "ko", "ru"],
     interpolation: {
       escapeValue: false,

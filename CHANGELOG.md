@@ -9,6 +9,10 @@ lives in the [NOIA2 repository](https://github.com/ZDYoung0519/NOIA2).
      and some players still update from there: so no hard wraps and no bold in
      2.0.0 and later. From 2.0.0 on the dialog renders Markdown. -->
 
+## [2.9.0]
+
+- target hp / maxHp in state and history
+
 ## [2.8.0]
 
 - Adds fight damage-taken totals and per-source breakdowns, bounded death recaps, per-player buff uptime, and observed NPC skill timelines to the local service API.

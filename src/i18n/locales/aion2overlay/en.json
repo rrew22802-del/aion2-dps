@@ -30,6 +30,7 @@
     "secondsShort": "s",
     "minutesShort": "m",
     "close": "Close",
+    "closeFailed": "Could not close window. Try again.",
     "empty": "Click a player row to view skill details",
     "noData": "No skill data",
     "damage": "Damage",

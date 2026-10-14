@@ -8,7 +8,7 @@
     "empty": "No players in the current fight yet"
   },
   "about": {
-    "appName": "DBAion2 DPS",
+    "appName": "TeamMate DPS",
     "version": "Version",
     "description": "A free, open-source real-time DPS meter for AION 2, from dbaion2.ru.",
     "basedOn": "Based on Aether and NOIA2 (GPL-3.0).",

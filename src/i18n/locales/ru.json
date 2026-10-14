@@ -8,7 +8,7 @@
     "empty": "В текущем бою пока нет игроков"
   },
   "about": {
-    "appName": "DBAion2 DPS",
+    "appName": "TeamMate DPS",
     "version": "Версия",
     "description": "Бесплатный DPS-метр с открытым кодом для AION 2, от dbaion2.ru.",
     "basedOn": "Основано на Aether и NOIA2 (GPL-3.0).",

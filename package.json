@@ -1,12 +1,13 @@
 {
   "name": "dbaion2-dps",
   "private": true,
-  "version": "2.8.0",
+  "version": "2.9.4",
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:service-api": "node --test scripts/fake-service-api.test.mjs",
     "check:undef": "eslint --config eslint.undef.config.mjs src",
     "preview": "vite preview",
     "release:version": "node scripts/release-version.mjs",

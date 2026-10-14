@@ -22,11 +22,33 @@ pub struct Options {
     parent: Option<u32>,
     lang: String,
     no_overlay: bool,
+    pub detail_diagnostic: bool,
+}
+
+#[tauri::command]
+pub fn detail_diagnostic_stage(stage: String) -> Result<(), String> {
+    if !ui_selftest_enabled() {
+        return Err("Diagnostic mode is disabled".into());
+    }
+    if stage.len() > 80 || !stage.is_ascii() { return Err("Invalid diagnostic stage".into()); }
+    eprintln!("[dps-detail] renderer stage: {stage}");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn detail_diagnostic_report(app: AppHandle, report: Value) -> Result<(), String> {
+    if !ui_selftest_enabled() {
+        return Err("Diagnostic mode is disabled".into());
+    }
+    eprintln!("[dps-detail] renderer diagnostic: {report}");
+    app.exit(0);
+    Ok(())
 }
 
 impl Options {
     pub fn parse(args: &[String]) -> Result<Option<Self>, String> {
         if !args.iter().any(|arg| arg == "--service") {
+            if args.iter().any(|arg| arg == "--ui-selftest") { return Err("--ui-selftest requires isolated --service mode".into()); }
             return Ok(None);
         }
         let value = |flag: &str| -> Option<&str> {
@@ -58,9 +80,23 @@ impl Options {
         if lang != "en" && lang != "ru" {
             return Err("--lang must be en or ru".into());
         }
-        Ok(Some(Self { port, token, parent, lang: lang.into(),
+        let debug_diagnostic = args.iter().any(|arg| arg == "--detail-diagnostic");
+        let release_selftest = args.iter().any(|arg| arg == "--ui-selftest");
+        if debug_diagnostic && !cfg!(debug_assertions) {
+            return Err("--detail-diagnostic is available only in debug builds".into());
+        }
+        if release_selftest && !args.iter().any(|arg| arg == "--no-overlay") { return Err("--ui-selftest requires --no-overlay".into()); }
+        let detail_diagnostic = debug_diagnostic || release_selftest;
+        Ok(Some(Self { port, token, parent, lang: lang.into(), detail_diagnostic,
             no_overlay: args.iter().any(|arg| arg == "--no-overlay") }))
     }
+}
+
+pub fn ui_selftest_enabled() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter().any(|arg| arg == "--service") && args.iter().any(|arg| arg == "--no-overlay")
+        && (args.iter().any(|arg| arg == "--ui-selftest")
+            || cfg!(debug_assertions) && args.iter().any(|arg| arg == "--detail-diagnostic"))
 }
 
 #[derive(Clone)]
@@ -90,6 +126,9 @@ fn parse_detail_request(body: &str) -> Option<(u32, String, Option<(i32, i32)>)>
 }
 
 pub fn start(app: AppHandle, options: Options) -> Result<(), Box<dyn std::error::Error>> {
+    if options.detail_diagnostic {
+        eprintln!("[dps-detail] diagnostic identifier={}", app.config().identifier);
+    }
     let server = Server::http(format!("127.0.0.1:{}", options.port))
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let health = Arc::new(RwLock::new(CaptureHealth { capture: "starting", message: String::new() }));
@@ -104,7 +143,31 @@ pub fn start(app: AppHandle, options: Options) -> Result<(), Box<dyn std::error:
     }
 
     let meter = app.state::<DpsMeter>();
+    // Headless integration must not silently start recording packets. The owner
+    // explicitly stopped recording; standalone UI can opt in separately.
+    let mut capture_config = meter.current_config();
+    capture_config.auto_record_unknown_server = false;
+    // Preserve early damage before a spawn/profile identifies the first boss.
+    // The host filters presentation to bosses after metadata becomes available.
+    capture_config.boss_only = false;
+    // Keep the separate PvP ledger available to the licensed Tracker UI.
+    capture_config.pvp_mode_on = true;
+    meter.apply_config(capture_config);
     *app.state::<crate::plugins::aion2_overlay::LanguageStore>().0.write().unwrap() = options.lang.clone();
+    if options.detail_diagnostic {
+        *health.write().unwrap() = CaptureHealth { capture: "diagnostic", message: "Synthetic history; capture disabled".into() };
+        tauri::async_runtime::spawn(async move {
+            let result = reqwest::Client::new().post(format!("http://127.0.0.1:{}/v1/ui/player-detail", options.port))
+                .header("x-dbaion2-token", &options.token)
+                .json(&json!({"playerId":16450,"fight":"__ui_fixture","x":80,"y":80}))
+                .send().await;
+            match result {
+                Ok(reply) => { eprintln!("[dps-detail] diagnostic HTTP route: {}", reply.status()); if !reply.status().is_success() { app.exit(1); } }
+                Err(error) => { eprintln!("[dps-detail] diagnostic HTTP route failed: {error}"); app.exit(1); }
+            }
+        });
+        return Ok(());
+    }
     let result = meter.start_dps_meter();
     *health.write().unwrap() = match result {
         Ok(()) => CaptureHealth { capture: "ok", message: String::new() },
@@ -128,6 +191,16 @@ pub fn start(app: AppHandle, options: Options) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+// Headless service exit (audit 10.10): app.exit() runs ExitRequested -> stop_dps_meter(), which can block on a capture thread;
+// orphaned services then stayed alive for hours with their HTTP server already closed. Ask nicely, then end the process.
+fn exit_service(app: &AppHandle) {
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(3));
+        std::process::exit(0);
+    });
+    app.exit(0);
+}
+
 fn watch_parent(app: AppHandle, parent: u32) {
     let pid = Pid::from_u32(parent);
     let mut system = System::new();
@@ -137,7 +210,7 @@ fn watch_parent(app: AppHandle, parent: u32) {
         std::thread::sleep(Duration::from_secs(1));
         system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
         if system.process(pid).map(|process| process.start_time()) != started || started.is_none() {
-            app.exit(0);
+            exit_service(&app);
             break;
         }
     }
@@ -165,7 +238,7 @@ fn serve(server: Server, app: AppHandle, options: Options, health: Arc<RwLock<Ca
         };
         respond(request, status, body);
         if quit {
-            app.exit(0);
+            exit_service(&app);
             break;
         }
     }
@@ -190,7 +263,8 @@ fn respond(request: Request, status: u16, body: Value) {
 fn asset_path(url: &str) -> Option<&str> {
     let path = url.split('?').next()?.strip_prefix("/v1/assets/")?;
     let name = path.strip_prefix("aion2/class/")
-        .or_else(|| path.strip_prefix("aion2/skill/"))?
+        .or_else(|| path.strip_prefix("aion2/skill/"))
+        .or_else(|| path.strip_prefix("aion2/buff/"))?
         .strip_suffix(".png")?;
     if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
         return None;
@@ -218,6 +292,10 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
     let meter = app.state::<DpsMeter>();
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
     match (method, path) {
+        (Method::Post, "/v1/identity/profile") => match own_profile_body(body) {
+            Some(packet) if meter.apply_own_profile(&packet) => (200, json!({"accepted":true}), false),
+            _ => (400, json!({"error":"invalid own profile"}), false),
+        },
         (Method::Get, "/v1/live") => {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -247,8 +325,12 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
         }
         (Method::Get, "/v1/health") => {
             let h = health.read().unwrap();
+            // "self": the own character outside fights (rework 11.10: the power used to reach the tracker only inside a fight row);
+            // cpAt = unix ms when the game itself reported the power, null while it is only an estimate
+            let own = meter.main_actor_profile().map(|(id, name, server, cp, cp_at)|
+                json!({"id": id, "name": name, "server": server, "cp": cp, "cpAt": cp_at}));
             (200, json!({"version": env!("CARGO_PKG_VERSION"), "capture": h.capture,
-                "message": h.message, "game": meter.has_game_traffic(), "pingMs": meter.ping_ms()}), false)
+                "message": h.message, "game": meter.has_game_traffic(), "pingMs": meter.ping_ms(), "self": own}), false)
         }
         (Method::Get, "/v1/state") => {
             // ?target=<id> pins one target of the session (owner 05.10: look at the boss alone, without resetting before it)
@@ -333,7 +415,12 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
             meter.reset_dps_meter(true);
             (200, json!({}), false)
         }
-        (Method::Post, "/v1/quit") => (200, json!({}), true),
+        (Method::Post, "/v1/quit") => {
+            // Persist the captured bosses before acknowledging the host's shutdown.
+            // The later stop path sees cleared counters, so it cannot archive them twice.
+            meter.reset_dps_meter(false);
+            (200, json!({}), true)
+        },
         (Method::Post, "/v1/ui/close") => {
             let result = app.get_webview_window("dps-detail")
                 .map(|window| window.hide().map_err(|error| error.to_string()))
@@ -347,10 +434,11 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
             match parse_detail_request(body) {
                 Some((player, fight, position)) => match selected_fight(&meter, &fight) {
                     Some(selected) if player_detail(&selected, player, &meter.party_snapshot().member_ids, lang).is_some() => {
-                        let selection = match selected {
+                        let mut selection = match selected {
                             SelectedFight::Current(_, target, _) => json!({"actorId": player, "targetId": target, "mode": "live"}),
                             SelectedFight::History(record) => json!({"actorId": player, "mode": "history", "record": record}),
                         };
+                        if ui_selftest_enabled() { selection["diagnostic"] = json!(true); }
                         let result = crate::plugins::aion2_overlay::set_detail_selection(
                             (*app).clone(), app.state(), selection)
                             .and_then(|_| crate::plugins::aion2_overlay::show_dps_detail(app, position, true));
@@ -388,7 +476,7 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
             let info = meter.get_pvp_watch_info(watch_names);
             let watched: Vec<_> = info.watch_info.into_iter().map(|p| {
                 let hp_pct = match (p.current_hp, p.max_hp) {
-                    (Some(current), Some(max)) if max > 0 => Some(current as f64 * 100.0 / max as f64),
+                (Some(current), Some(max)) if max > 0 => Some(current as f64 * 100.0 / max as f64),
                     _ => None,
                 };
                 json!({"name": p.query_name, "actorId": p.actor_id, "actorName": p.actor_name,
@@ -414,6 +502,13 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
             match meter.get_history().into_iter().find(|record| record.id == id) {
                 Some(record) => (200, record_state(&record, &meter.party_snapshot().member_ids, lang), false),
                 None => (404, json!({"error": "fight not found"}), false),
+            }
+        }
+        (Method::Get, _) if path.starts_with("/v1/fights/") && path.ends_with("/events") => {
+            let fight = path.trim_start_matches("/v1/fights/").trim_end_matches("/events").trim_end_matches('/');
+            match selected_fight(&meter, fight) {
+                Some(selected) => (200, events_for(&selected, fight), false),
+                None => (404, json!({"error":"fight not found"}), false),
             }
         }
         (Method::Get, _) if path.starts_with("/v1/fights/") && path.ends_with("/timeline") => {
@@ -501,10 +596,21 @@ fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query.split('&').filter_map(|pair| pair.split_once('=')).find(|(k, _)| *k == key).map(|(_, v)| v)
 }
 
+fn own_profile_body(body: &str) -> Option<Vec<u8>> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let hex = value.get("packet")?.as_str()?;
+    if !(24..=16_000).contains(&hex.len()) || hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+    let packet: Vec<u8> = hex.as_bytes().chunks_exact(2).map(|bytes| {
+        u8::from_str_radix(std::str::from_utf8(bytes).unwrap(), 16).unwrap()
+    }).collect();
+    crate::dps_meter::capture::parser::nickname::decode_main_profile(&packet)?;
+    Some(packet)
+}
+
 fn timing(target: Option<&TargetInfo>, fallback_ms: u64) -> (u64, f64) {
     let started = target.and_then(|t| t.target_start_time.values().copied().reduce(f64::min))
         .map(|s| (s * 1000.0) as u64).unwrap_or(fallback_ms);
-    let ended = target.and_then(|t| t.target_last_time.values().copied().reduce(f64::max))
+    let ended = target.and_then(TargetInfo::ended_at)
         .unwrap_or(started as f64 / 1000.0);
     (started, (ended - started as f64 / 1000.0).max(0.0))
 }
@@ -513,8 +619,12 @@ fn target_json(target: Option<&TargetInfo>, lang: &str) -> Value {
     match target {
         Some(t) => json!({"name": target_name(t, lang),
             "npcId": t.target_mob_code, "isBoss": t.target_mob_code.map(|_| t.is_boss),
-            "hpPct": match (t.current_hp, t.max_hp) {
-                (Some(current), Some(max)) if max > 0 => Some(current as f64 * 100.0 / max as f64),
+            // Old archives also stored packet-decoded currentHp, but their maxHp is a peak.
+            "hp": t.packet_hp.as_ref().and_then(|hp| hp.hp).or(t.current_hp),
+            "maxHp": t.packet_hp.as_ref().and_then(|hp| hp.max_hp),
+            "hpPct": match (t.packet_hp.as_ref().and_then(|hp| hp.hp).or(t.current_hp), t.packet_hp.as_ref().and_then(|hp| hp.max_hp)) {
+                (Some(0), _) => Some(0.0),
+                (Some(current), Some(max)) if max > 0 && current <= max => Some(current as f64 * 100.0 / max as f64),
                 _ => None,
             }}),
         None => Value::Null,
@@ -596,16 +706,19 @@ fn fight_state(id: String, active: bool, target: Option<&TargetInfo>,
     damage_taken: &HashMap<u32, Vec<TakenSourceStat>>) -> Value
 {
     let (started, duration) = timing(target, fallback_ms);
-    let total: u64 = stats.values().map(|p| p.total_damage).sum();
-    let mut players: Vec<_> = stats.values().collect();
+    let raw_total: u64 = stats.values().map(|p| p.total_damage).sum();
+    let mut players: Vec<_> = stats.values().filter(|p| self_id == Some(p.actor_id) || party_ids.contains(&p.actor_id) || !p.actor_name.trim().is_empty()).collect();
+    let total: u64 = players.iter().map(|p| p.total_damage).sum();
     players.sort_by(|a, b| b.total_damage.cmp(&a.total_damage));
     let players = players.into_iter().map(|p| {
         let mut value = player_json(p, self_id, owners, party_ids, lang);
+        value["dps"] = json!(p.total_damage as f64 / duration.max(1.0));
+        value["share"] = json!(if total > 0 { p.total_damage as f64 / total as f64 } else { 0.0 });
         add_damage_taken(&mut value, damage_taken.get(&p.actor_id).map(Vec::as_slice).unwrap_or(&[]));
         value
     }).collect::<Vec<_>>();
-    json!({"fightId": id, "active": active, "startedAt": started,
-        "durationSec": duration, "target": target_json(target, lang), "totalDamage": total,
+    json!({"fightId": id, "active": active, "startedAt": started, "stoppedAt": target.and_then(|t| t.stopped_at).map(|at| (at * 1000.0) as u64),
+        "durationSec": duration, "target": target_json(target, lang), "totalDamage": total, "unattributedDamage": raw_total.saturating_sub(total),
         "players": players})
 }
 
@@ -613,6 +726,18 @@ fn current_target(snapshot: &CombatSnapshot) -> Option<u32> {
     // once we know our character, only its own fights count: falling back to anyone's last target showed other
     // players' fights as ours whenever we stood still (owner, Global 01.10)
     if snapshot.combat_infos.main_actor_id.is_some() {
+        // A hit on an add / reflected self hit must not replace the active boss.
+        // Only the local character's confirmed contribution can establish this boss.
+        let me = snapshot.combat_infos.main_actor_id.unwrap();
+        let now = snapshot.combat_infos.time_now;
+        let engaged_boss = snapshot.combat_infos.target_infos.values()
+            .filter(|t| t.is_boss && t.target_mob_code.is_some()
+                && snapshot.by_target_player_stats.get(&t.id).and_then(|s| s.get(&me)).is_some_and(|p| p.total_damage > 0))
+            .filter_map(|t| {
+                let last = t.target_last_time.values().copied().reduce(f64::max)?;
+                (now >= last && now - last < 90.0).then_some((t.id, t.stopped_at.is_none() && t.current_hp != Some(0), last))
+            }).max_by(|a,b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2))).map(|(id,_,_)| id);
+        if engaged_boss.is_some() { return engaged_boss; }
         return snapshot.combat_infos.last_target_by_main_actor
             .filter(|id| snapshot.by_target_player_stats.contains_key(id));
     }
@@ -629,7 +754,10 @@ fn targets_json(snapshot: Option<&CombatSnapshot>, lang: &str) -> Value {
     let fallback = (snapshot.combat_infos.time_now * 1000.0) as u64;
     let mut rows: Vec<(bool, f64, Value)> = snapshot.by_target_player_stats.iter().map(|(id, stats)| {
         let target = snapshot.combat_infos.target_infos.get(id);
-        let (started, duration) = timing(target, fallback);
+        let (started, _) = timing(target, fallback);
+        // Run DPS uses the damage interval and omits walking between packs.
+        let duration = target.and_then(|t| t.target_last_time.values().copied().reduce(f64::max))
+            .map(|last| (last - started as f64 / 1000.0).max(0.0)).unwrap_or(0.0);
         let last = target.and_then(|t| t.target_last_time.values().copied().reduce(f64::max)).unwrap_or(0.0);
         let boss = target.is_some_and(|t| t.is_boss && t.target_mob_code.is_some());
         let own = snapshot.combat_infos.main_actor_id.and_then(|me| stats.get(&me)).map(|p| p.total_damage);
@@ -654,7 +782,7 @@ fn current_state(snapshot: Option<&CombatSnapshot>, owners: &HashSet<u32>, party
     let fallback = (snapshot.combat_infos.time_now * 1000.0) as u64;
     let (started, _) = timing(target, fallback);
     let taken = snapshot.damage_taken_by_target.get(&id).cloned().unwrap_or_default();
-    let mut state = fight_state(format!("{id}-{started}"), true, target,
+    let mut state = fight_state(format!("{id}-{started}"), target.is_none_or(|t| t.stopped_at.is_none()), target,
         &snapshot.by_target_player_stats[&id], snapshot.combat_infos.main_actor_id,
         Some(owners), party_ids, fallback, lang, &taken);
     add_taken_only_players(&mut state, &taken, &snapshot.combat_infos.actor_infos,
@@ -689,7 +817,7 @@ fn history_row(record: &HistoryRecord, current_party_ids: &HashSet<u32>, lang: &
     let mut row = json!({"fightId": record.id, "startedAt": started, "durationSec": duration,
         "target": record.target_info.as_ref().and_then(|t| target_name(t, lang)),
         "isBoss": record.target_info.as_ref().and_then(|t| t.target_mob_code.map(|_| t.is_boss)),
-        "totalDamage": record.total_damage, "selfDps": self_stat.map(|s| s.dps),
+        "totalDamage": record.total_damage, "selfDps": self_stat.map(|s| s.total_damage as f64 / duration.max(1.0)),
         "selfShare": self_stat.map(|s| s.damage_share),
         "healTotal": record.player_stats.values().map(|p| p.heal_total).sum::<u64>(),
         "hps": self_stat.map(|s| s.hps), "deaths": record.player_stats.values().map(|p| p.deaths).sum::<u32>(),
@@ -697,6 +825,7 @@ fn history_row(record: &HistoryRecord, current_party_ids: &HashSet<u32>, lang: &
         "mapId": null,
         "players": players.into_iter().map(|player| {
             let mut value = player_json(player, record.combat_infos.main_actor_id, record.summon_owner_ids.as_ref(), party_ids, lang);
+            value["dps"] = json!(player.total_damage as f64 / duration.max(1.0));
             add_damage_taken(&mut value, record.damage_taken.get(&player.actor_id).map(Vec::as_slice).unwrap_or(&[]));
             value
         }).collect::<Vec<_>>()});
@@ -710,12 +839,12 @@ fn fight_timeline(fight: &SelectedFight, player: u32) -> Option<Value> {
         SelectedFight::Current(snapshot, target, _) => {
             let target_info = snapshot.combat_infos.target_infos.get(target);
             let events = snapshot.combat_events.iter().filter(|event| event.target_id == *target).cloned().collect::<Vec<_>>();
-            let duration = target_info.and_then(|t| t.target_last_time.values().copied().reduce(f64::max).zip(t.target_start_time.values().copied().reduce(f64::min))).map(|(end,start)| ((end-start).max(1.0)*1000.0) as u64).unwrap_or(0);
+            let duration = target_info.map(|t| (t.duration_seconds().max(1.0)*1000.0) as u64).unwrap_or(0);
             (*target, events, snapshot.buff_intervals.clone(), duration, snapshot.by_target_player_stats.get(target).is_some_and(|stats| stats.contains_key(&player)))
         }
         SelectedFight::History(record) => {
             let start = record.target_info.as_ref().and_then(|t| t.target_start_time.values().copied().reduce(f64::min)).unwrap_or(0.0);
-            let end = record.target_info.as_ref().and_then(|t| t.target_last_time.values().copied().reduce(f64::max)).unwrap_or(start);
+            let end = record.target_info.as_ref().and_then(TargetInfo::ended_at).unwrap_or(start);
             (record.target_id, record.combat_events.clone(), record.buff_intervals.clone(), ((end-start).max(1.0)*1000.0) as u64, record.player_stats.contains_key(&player))
         }
     };
@@ -752,13 +881,29 @@ fn fight_timeline(fight: &SelectedFight, player: u32) -> Option<Value> {
     Some(json!({"durationMs":duration_ms,"damagePerSecond":per_second,"casts":casts,"buffs":own_buffs}))
 }
 
+// Read-only diagnostic view under the service's existing bearer authentication.
+fn events_for(fight: &SelectedFight, fight_id: &str) -> Value {
+    let (id, events, infos, target) = match fight {
+        SelectedFight::Current(snapshot, id, _) => (*id, &snapshot.combat_events,
+            &snapshot.combat_infos, snapshot.combat_infos.target_infos.get(id)),
+        SelectedFight::History(record) => (record.target_id, &record.combat_events,
+            &record.combat_infos, record.target_info.as_ref()),
+    };
+    let (start,end) = fight_bounds(fight);
+    json!({"fightId":fight_id,"targetId":id,"startedAt":start,"endedAt":end,
+        "stoppedAt":target.and_then(|t|t.stopped_at).map(|v|(v*1000.0) as u64),
+        "target":target,"mapId":null,"mainActorId":infos.main_actor_id,
+        "actors":infos.actor_infos,
+        "events":events.iter().filter(|event|event.target_id==id).collect::<Vec<_>>()})
+}
+
 fn fight_bounds(fight: &SelectedFight) -> (u64, u64) {
     let (target, fallback) = match fight {
         SelectedFight::Current(snapshot, target, _) => (snapshot.combat_infos.target_infos.get(target), (snapshot.combat_infos.time_now * 1000.0) as u64),
         SelectedFight::History(record) => (record.target_info.as_ref(), record.created_at),
     };
     let start = target.and_then(|t| t.target_start_time.values().copied().reduce(f64::min)).map(|v| (v * 1000.0) as u64).unwrap_or(fallback);
-    let end = target.and_then(|t| t.target_last_time.values().copied().reduce(f64::max)).map(|v| (v * 1000.0) as u64).unwrap_or(fallback).max(start);
+    let end = target.and_then(TargetInfo::ended_at).map(|v| (v * 1000.0) as u64).unwrap_or(fallback).max(start);
     (start, end.min(start.saturating_add(1_200_000)))
 }
 
@@ -913,13 +1058,23 @@ enum SelectedFight {
 }
 
 fn selected_fight(meter: &DpsMeter, fight: &str) -> Option<SelectedFight> {
+    if ui_selftest_enabled() && fight == "__ui_fixture" {
+        let mut record: Value = serde_json::from_str(include_str!("../tests/fixtures/target-hp-history-record.json")).ok()?;
+        let skills: serde_json::Map<String, Value> = (0..100).map(|index| ((10000000 + index).to_string(),
+            json!({"totalDamage":12345,"counts":10,"minDamage":500,"maxDamage":2000,"specialCounts":{}}))).collect();
+        record["playerSkillStats"] = json!({"16450":skills});
+        return serde_json::from_value(record).ok().map(SelectedFight::History);
+    }
     if let Some(snapshot) = meter.get_dps_snapshot(0) {
-        if let Some(target) = current_target(&snapshot) {
-            let started = timing(snapshot.combat_infos.target_infos.get(&target),
-                (snapshot.combat_infos.time_now * 1000.0) as u64).0;
-            if fight == "current" || fight == format!("{target}-{started}") {
-                return Some(SelectedFight::Current(snapshot, target, meter.summon_owner_ids()));
-            }
+        let target = if fight == "current" { current_target(&snapshot) } else {
+            snapshot.by_target_player_stats.keys().copied().find(|id| {
+                let started=timing(snapshot.combat_infos.target_infos.get(id),
+                    (snapshot.combat_infos.time_now * 1000.0) as u64).0;
+                fight == format!("{id}-{started}")
+            })
+        };
+        if let Some(target) = target {
+            return Some(SelectedFight::Current(snapshot, target, meter.summon_owner_ids()));
         }
     }
     if fight == "current" { return None; }
@@ -970,9 +1125,7 @@ fn player_detail(fight: &SelectedFight, player: u32, party_ids: &HashSet<u32>, l
             record.party_member_ids.as_ref().unwrap_or(party_ids)),
     };
     let mut value = player_json(stats, self_id, owners, selected_party_ids, lang);
-    let start = target.and_then(|t| t.target_start_time.get(&player)).copied();
-    let end = target.and_then(|t| t.target_last_time.get(&player)).copied();
-    let fight_sec = start.zip(end).map(|(a, b)| (b - a).max(1.0));
+    let fight_sec = target.map(|t| t.duration_seconds().max(1.0));
     let object = value.as_object_mut()?;
     object.insert("fightSec".into(), json!(fight_sec));
     if let Some(seconds) = fight_sec {
@@ -986,6 +1139,11 @@ fn player_detail(fight: &SelectedFight, player: u32, party_ids: &HashSet<u32>, l
     Some(value)
 }
 
+fn buff_metadata() -> &'static HashMap<String, Value> {
+    static DATA: std::sync::OnceLock<HashMap<String, Value>> = std::sync::OnceLock::new();
+    DATA.get_or_init(|| serde_json::from_str(include_str!("../../src/i18n/locales/aion2skills/buff_metadata.json")).unwrap_or_default())
+}
+
 fn buffs_for(fight: &SelectedFight, player: u32, lang: &str) -> Value {
     let (buffs, actors, boss) = match fight {
         SelectedFight::Current(snapshot, target, _) => (&snapshot.use_buffs_by_target,
@@ -995,8 +1153,8 @@ fn buffs_for(fight: &SelectedFight, player: u32, lang: &str) -> Value {
     };
     let rows = |target| -> Vec<Value> {
         buffs.get(&target).into_iter().flatten().map(|buff| json!({
-            "id": buff.skill_code, "name": skill_name(buff.skill_code, lang),
-            "icon": skill_icon(buff.skill_code), "uptime": buff.coverage,
+            "id": buff.skill_code, "name": buff_metadata().get(&buff.skill_code.to_string()).and_then(|m| m.get(lang)).and_then(Value::as_str).or_else(|| skill_name(buff.skill_code, lang)),
+            "icon": buff_metadata().get(&buff.skill_code.to_string()).and_then(|m| m.get("icon")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(|s| format!("aion2/buff/{s}.png")).unwrap_or_else(|| skill_icon(buff.skill_code)), "uptime": buff.coverage,
             "source": actors.get(&buff.actor_id).and_then(|actor| actor.actor_name.as_deref()),
         })).collect()
     };
@@ -1006,6 +1164,79 @@ fn buffs_for(fight: &SelectedFight, player: u32, lang: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hp_record() -> HistoryRecord {
+        serde_json::from_str(include_str!("../tests/fixtures/target-hp-history-record.json")).unwrap()
+    }
+
+    #[test]
+    fn packet_hp_state_and_history_contract() {
+        let record = hp_record();
+        let snapshot: CombatSnapshot = serde_json::from_value(json!({
+            "totalDamage": record.total_damage,
+            "byTargetPlayerSkillStats": {},
+            "byTargetPlayerStats": {"9001": record.player_stats},
+            "combatInfos": record.combat_infos,
+            "lastTargetInfo": record.target_info
+        })).unwrap();
+        let mut expected: Value = serde_json::from_str(include_str!("../tests/fixtures/target-hp-state.json")).unwrap();
+        expected["unattributedDamage"] = json!(0);
+        expected["stoppedAt"] = Value::Null;
+        expected["target"]["hpPct"] = Value::Null; expected["boss"]["target"]["hpPct"] = Value::Null;
+        expected["players"][0]["dps"] = json!(1_234_567f64 / 42.5);
+        let state = current_state(Some(&snapshot), &HashSet::new(), &HashSet::new(), None, "en");
+        assert_eq!(state, expected);
+        let pinned = current_state(Some(&snapshot), &HashSet::new(), &HashSet::new(), Some(9001), "en");
+        assert_eq!(pinned["target"], expected["target"]);
+        assert_eq!(pinned["pinned"], json!(true));
+        let archived = record_state(&hp_record(), &HashSet::new(), "en");
+        assert_eq!(archived["target"], expected["target"]);
+        assert_eq!(archived["active"], json!(false));
+        assert_eq!(archived["fightId"], expected["fightId"]);
+        assert_eq!(target_json(None, "en"), Value::Null);
+        assert_eq!(current_state(None, &HashSet::new(), &HashSet::new(), None, "en")["target"], Value::Null);
+    }
+
+    #[test]
+    fn absolute_hp_never_uses_an_observed_peak_or_a_percentage() {
+        use crate::dps_meter::models::combat::PacketHp;
+        let mut target = hp_record().target_info.unwrap();
+        target.packet_hp = None; // legacy archive: currentHp is decoded, maxHp is observed
+        let old = target_json(Some(&target), "en");
+        assert_eq!(old["hp"], json!(37_500_000));
+        assert_eq!(old["maxHp"], Value::Null);
+        assert_eq!(old["hpPct"], Value::Null);
+        target.current_hp = None;
+        let unknown = target_json(Some(&target), "en");
+        assert_eq!(unknown["hp"], Value::Null);
+        assert_eq!(unknown["maxHp"], Value::Null);
+
+        // Test the nullable contract for a future decoder supplying a confirmed maximum.
+        target.packet_hp = Some(PacketHp { hp: Some(0), max_hp: Some(100_000_000) });
+        let dead = target_json(Some(&target), "ru");
+        assert_eq!(dead["hp"], json!(0));
+        assert_eq!(dead["maxHp"], json!(100_000_000));
+        assert_eq!(dead["name"], Value::Null);
+        target.packet_hp = Some(PacketHp { hp: None, max_hp: Some(u32::MAX) });
+        let max_only = target_json(Some(&target), "en");
+        assert_eq!(max_only["hp"], Value::Null);
+        assert_eq!(max_only["maxHp"], json!(u32::MAX));
+    }
+
+    #[test]
+    fn decoded_zero_hp_is_an_integer_in_the_api() {
+        use crate::dps_meter::capture::parser::summon::parse_remain_hp_fields;
+        use crate::dps_meter::models::combat::PacketHp;
+        let packet = [0x00, 0x8D, 0x8C, 0x95, 0x04, 0x02, 0x01, 0, 0, 0, 0, 0];
+        let (_, hp) = parse_remain_hp_fields(&packet, 2).unwrap();
+        let mut target = hp_record().target_info.unwrap();
+        target.current_hp = Some(hp);
+        target.packet_hp = Some(PacketHp { hp: Some(hp), max_hp: None });
+        let state = target_json(Some(&target), "en");
+        assert_eq!(state["hp"].as_u64(), Some(0));
+        assert_eq!(state["maxHp"], Value::Null);
+        assert_eq!(state["hpPct"], json!(0.0));
+    }
 
     #[test]
     fn service_contract_basics() {
@@ -1039,5 +1270,123 @@ mod tests {
         assert_eq!(parse_detail_request(r#"{"playerId":7,"fight":"current","x":-50,"y":20}"#),
             Some((7, "current".into(), Some((-50, 20)))));
         assert!(parse_detail_request(r#"{"playerId":7,"fight":"current","x":20}"#).is_none());
+    }
+
+    #[test]
+    fn host_own_profile_route_accepts_only_valid_own_packets() {
+        assert!(own_profile_body(r#"{"packet":"3336B20C5E81C128370472776E64FE0810000000"}"#).is_some());
+        assert!(own_profile_body(r#"{"packet":"4536B20C5E81C128370472776E64FE0810000000"}"#).is_none());
+        assert!(own_profile_body(r#"{"packet":"3336B20C5E81C12804FFFFFFFFFE0810"}"#).is_none());
+        assert!(own_profile_body(r#"{"packet":"not hex"}"#).is_none());
+    }
+}
+
+#[cfg(test)]
+mod dps_encounter_regressions {
+    use super::*;
+    fn snapshot() -> CombatSnapshot {
+        let record: HistoryRecord = serde_json::from_str(include_str!("../tests/fixtures/target-hp-history-record.json")).unwrap();
+        serde_json::from_value(json!({"totalDamage": record.total_damage,
+            "byTargetPlayerSkillStats": {}, "byTargetPlayerStats": {"9001": record.player_stats},
+            "combatInfos": record.combat_infos, "lastTargetInfo": record.target_info})).unwrap()
+    }
+    #[test]
+    fn event_export_keeps_all_players_but_only_the_requested_target() {
+        let mut snap=snapshot();
+        snap.combat_events=vec![
+            crate::dps_meter::models::combat::CombatEvent {target_id:9001,actor_id:1,skill_code:100,damage:10,is_crit:false,at_ms:1000},
+            crate::dps_meter::models::combat::CombatEvent {target_id:9002,actor_id:2,skill_code:200,damage:20,is_crit:true,at_ms:2000},
+            crate::dps_meter::models::combat::CombatEvent {target_id:9001,actor_id:3,skill_code:300,damage:30,is_crit:true,at_ms:3000}];
+        let value=events_for(&SelectedFight::Current(snap,9001,HashSet::new()),"current");
+        assert_eq!(value["events"].as_array().unwrap().len(),2);
+        assert_eq!(value["events"][0]["actorId"],json!(1));
+        assert_eq!(value["events"][1]["actorId"],json!(3));
+        assert_eq!(value["targetId"],json!(9001));
+        assert!(value.get("token").is_none());
+    }
+    #[test]
+    fn first_boss_stays_selected_when_own_last_hit_targets_an_add() {
+        let mut snap = snapshot();
+        let mut add = snap.combat_infos.target_infos[&9001].clone();
+        add.id = 9002; add.is_boss = false;
+        add.target_last_time.insert(16450, snap.combat_infos.time_now + 1.0);
+        snap.combat_infos.target_infos.insert(9002, add);
+        snap.by_target_player_stats.insert(9002, snap.by_target_player_stats[&9001].clone());
+        snap.combat_infos.last_target_by_main_actor = Some(9002);
+        snap.combat_infos.time_now += 1.0;
+        assert_eq!(current_target(&snap), Some(9001));
+        // A nearby boss with no own contribution must never be selected.
+        snap.by_target_player_stats.get_mut(&9001).unwrap().clear();
+        assert_eq!(current_target(&snap), Some(9002));
+    }
+    #[test]
+    fn late_joiner_detail_uses_common_encounter_duration() {
+        let mut snap = snapshot();
+        let t = snap.combat_infos.target_infos.get_mut(&9001).unwrap();
+        t.target_start_time = HashMap::from([(16450, 100.0), (7, 115.0)]);
+        t.target_last_time = HashMap::from([(16450, 120.0), (7, 120.0)]);
+        snap.combat_infos.time_now = 120.0;
+        let mut p = snap.by_target_player_stats[&9001][&16450].clone();
+        p.actor_id = 7; p.total_damage = 50_000;
+        snap.by_target_player_stats.get_mut(&9001).unwrap().insert(7, p);
+        let detail = player_detail(&SelectedFight::Current(snap, 9001, HashSet::new()), 7, &HashSet::new(), "en").unwrap();
+        assert_eq!(detail["fightSec"], json!(20.0));
+        assert_eq!(detail["dps"], json!(2500.0));
+    }
+    #[test]
+    fn encounter_clock_keeps_pauses_and_freezes_on_death_in_all_views() {
+        let mut snap = snapshot();
+        let t = snap.combat_infos.target_infos.get_mut(&9001).unwrap();
+        t.target_start_time = HashMap::from([(16450, 100.0)]);
+        t.target_last_time = HashMap::from([(16450, 110.0)]);
+        t.elapsed_at = Some(115.0); t.stopped_at = Some(112.0);
+        snap.by_target_player_stats.get_mut(&9001).unwrap().get_mut(&16450).unwrap().total_damage = 1_000_000;
+        let state = current_state(Some(&snap), &HashSet::new(), &HashSet::new(), None, "en");
+        let detail = player_detail(&SelectedFight::Current(snap.clone(), 9001, HashSet::new()), 16450, &HashSet::new(), "en").unwrap();
+        assert_eq!(state["durationSec"], json!(12.0));
+        assert_eq!(state["players"][0]["dps"], json!(1_000_000.0/12.0));
+        assert_eq!(detail["dps"], state["players"][0]["dps"]);
+        assert_eq!(targets_json(Some(&snap), "en")[0]["durationSec"], json!(10.0));
+        let mut record: HistoryRecord = serde_json::from_str(include_str!("../tests/fixtures/target-hp-history-record.json")).unwrap();
+        record.target_info = snap.combat_infos.target_infos.get(&9001).cloned();
+        record.player_stats = snap.by_target_player_stats[&9001].clone();
+        let history = history_row(&record, &HashSet::new(), "en");
+        assert_eq!(history["durationSec"], state["durationSec"]);
+        assert_eq!(history["selfDps"], detail["dps"]);
+        assert_eq!(history["players"][0]["dps"], detail["dps"]);
+    }
+    #[test]
+    fn completed_boss_remains_available_for_result_then_expires() {
+        let mut snap = snapshot();
+        snap.combat_infos.last_target_by_main_actor = None;
+        snap.combat_infos.target_infos.get_mut(&9001).unwrap().current_hp = Some(0);
+        assert_eq!(current_target(&snap), Some(9001));
+        snap.combat_infos.target_infos.get_mut(&9001).unwrap().current_hp = Some(1);
+        snap.combat_infos.time_now += 100.0;
+        assert_eq!(current_target(&snap), None);
+    }
+}
+
+#[cfg(test)]
+mod participant_105_tests {
+    use super::*;
+    #[test]
+    fn unknown_entity_is_not_a_player_and_damage_remains_pending() {
+        let record: HistoryRecord = serde_json::from_str(include_str!("../tests/fixtures/target-hp-history-record.json")).unwrap();
+        let mut stats = record.player_stats.clone();
+        let mut ghost = stats.values().next().unwrap().clone();
+        ghost.actor_id=999; ghost.actor_name=String::new(); ghost.actor_class="Elementalist".into(); ghost.total_damage=500;
+        stats.insert(999,ghost);
+        let view=fight_state("audit".into(),true,record.target_info.as_ref(),&stats,record.combat_infos.main_actor_id,None,&HashSet::new(),0,"en",&HashMap::new());
+        assert_eq!(view["players"].as_array().unwrap().len(),1);
+        assert_eq!(view["unattributedDamage"],json!(500));
+        assert_eq!(stats.len(),2,"raw damage must remain available for later ownership resolution");
+        assert_eq!(view["players"][0]["share"],json!(1.0));
+    }
+    #[test]
+    fn game_buff_metadata_is_not_a_skill_guess() {
+        let row=&buff_metadata()["22101011"];
+        assert!(!row["ru"].as_str().unwrap().is_empty());
+        assert_eq!(row["icon"],"Icon_Item_Usable_Scroll_FlySpeed_A_002");
     }
 }

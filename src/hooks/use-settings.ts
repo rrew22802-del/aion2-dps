@@ -114,7 +114,7 @@ const DEFAULTS: AppConfig = {
       maxPacketSizeThreshold: 8192,
       stallResyncDelayMs: 1000,
       fullProcessorStallResyncDelayMs: 200,
-      unknownPacketStallResyncDelayMs: 50,
+      unknownPacketStallResyncDelayMs: 200,
       bossOnly: false,
       pvpModeOn: false,
       pvpOverlayPosition: "bottom",

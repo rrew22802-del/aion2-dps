@@ -153,18 +153,7 @@ fn candidate(record: &HistoryRecord) -> Option<PersonalBest> {
         return None;
     }
 
-    // Your own time on the target, and the fight's when yours is missing.
-    let own = target
-        .target_start_time
-        .get(&you.actor_id)
-        .zip(target.target_last_time.get(&you.actor_id))
-        .map(|(start, end)| end - start);
-    let team = || {
-        let start = target.target_start_time.values().copied().fold(f64::MAX, f64::min);
-        let end = target.target_last_time.values().copied().fold(f64::MIN, f64::max);
-        (end > start).then_some(end - start)
-    };
-    let duration = own.filter(|d| *d > 0.0).or_else(team)?;
+    let duration = target.duration_seconds();
     if duration < MIN_FIGHT_SECS {
         return None;
     }
@@ -213,12 +202,15 @@ mod tests {
             target_id: 99,
             total_damage: (dps * secs) as u64,
             target_info: Some(TargetInfo {
+                elapsed_at: None,
+                stopped_at: None,
                 id: 99,
                 target_mob_code: Some(mob),
                 target_name: Some("Kromede".into()),
                 is_boss,
                 current_hp: None,
                 max_hp: None,
+                packet_hp: None,
                 target_start_time: HashMap::from([(1, 100.0)]),
                 target_last_time: HashMap::from([(1, 100.0 + secs)]),
             }),
@@ -234,10 +226,14 @@ mod tests {
             player_skill_stats: HashMap::new(),
             player_stats,
             summon_owner_ids: None,
+            party_member_ids: None,
             use_buffs_by_target: HashMap::new(),
             created_at: 1,
             combat_events: Vec::new(),
             buff_intervals: HashMap::new(),
+            damage_taken: HashMap::new(),
+            death_recaps: Vec::new(),
+            boss_casts: Vec::new(),
         }
     }
 

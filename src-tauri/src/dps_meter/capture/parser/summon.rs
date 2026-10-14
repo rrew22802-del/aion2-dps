@@ -19,35 +19,23 @@ impl StreamProcessor {
             return false;
         }
 
-        let mut pos = offset + 2;
-        let summon_info = read_varint(packet, pos);
-        if !summon_info.is_valid() || summon_info.value < 100 {
+        let Some((summon_id, owner_id)) = parse_summon_owner_048d(packet) else {
             return false;
-        }
-        pos += summon_info.length;
-        if pos + 4 > packet.len() || packet[pos..pos + 4] != [0x00, 0x00, 0x00, 0x00] {
-            return false;
-        }
-        pos += 4;
-
-        let owner_info = read_varint(packet, pos);
-        if !owner_info.is_valid() || owner_info.value == summon_info.value {
-            return false;
-        }
+        };
 
         self.data_storage
-            .append_summon(owner_info.value as u32, summon_info.value as u32);
-        if self.is_boss_summon(summon_info.value as u32) {
+            .append_summon(owner_id, summon_id);
+        if self.is_boss_summon(summon_id) {
             self.logger.info(format!(
                 "[{}] summon ownership owner={} owner_name={} summon={}",
                 self.port,
-                owner_info.value,
+                owner_id,
                 self.data_storage
                     .actor_id_name_snapshot()
-                    .get(&(owner_info.value as u32))
+                    .get(&owner_id)
                     .cloned()
                     .unwrap_or_else(|| "Unknown".to_string()),
-                summon_info.value
+                summon_id
             ));
         }
         true
@@ -70,6 +58,10 @@ impl StreamProcessor {
             return false;
         }
 
+        if let Some((id,code,hp,max))=super::npc_vitals::spawn_vitals(packet) {
+            self.data_storage.append_mob(id,code);
+            self.data_storage.append_mob_vitals(id,hp,max);
+        }
         let summon_id = summon_info.value as u32;
         let mut parsed_any = false;
 
@@ -416,7 +408,21 @@ impl StreamProcessor {
     }
 }
 
-fn parse_remain_hp_fields(packet: &[u8], offset_after_opcode: usize) -> Option<(u32, u32)> {
+pub(crate) fn parse_summon_owner_048d(packet: &[u8]) -> Option<(u32, u32)> {
+    if packet.get(..2)? != [0x04, 0x8D] { return None; }
+    let summon = read_varint(packet, 2);
+    if !summon.is_valid() || summon.value < 100 { return None; }
+    let pos = 2 + summon.length;
+    if packet.get(pos..pos + 4)? != [0, 0, 0, 0] { return None; }
+    let owner = read_varint(packet, pos + 4);
+    // A captured 048D zero owner is not a new owner: it arrives between a trap's
+    // initial hit and delayed explosion and must preserve the 4136 ownership.
+    if !owner.is_valid() || owner.value <= 0 || owner.value == summon.value { return None; }
+    Some((u32::try_from(summon.value).ok()?, u32::try_from(owner.value).ok()?))
+}
+
+pub(crate) fn parse_remain_hp_fields(packet: &[u8], offset_after_opcode: usize) -> Option<(u32, u32)> {
+    // 00 8D: entity varint, three unknown varints, current HP u32 LE. No max HP is decoded.
     let mut offset = offset_after_opcode;
     let id = read_varint(packet, offset);
     if !id.is_valid() || id.value < 100 { return None; }
@@ -433,12 +439,47 @@ fn parse_remain_hp_fields(packet: &[u8], offset_after_opcode: usize) -> Option<(
 
 #[cfg(test)]
 mod death_capture_tests {
-    use super::parse_remain_hp_fields;
+    use super::{parse_remain_hp_fields, parse_summon_owner_048d};
+
+    fn hex(value: &str) -> Vec<u8> {
+        (0..value.len()).step_by(2).map(|at| u8::from_str_radix(&value[at..at + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn ferk_trap_zero_owner_updates_do_not_clear_the_captured_owner() {
+        // Actual 13 October complete fight: each follows a 4136 owner=9474 spawn.
+        for packet in [
+            "048DF1FE02000000000000000000000000800600000000",
+            "048D819A03000000000000000000000000800600000000",
+            "048D9E9201000000000000000000000000800600000000",
+        ] {
+            assert_eq!(parse_summon_owner_048d(&hex(packet)), None);
+        }
+        // A nonzero owner remains supported; malformed and self-owned packets do not.
+        assert_eq!(parse_summon_owner_048d(&hex("048DF1FE0200000000824A")), Some((49009, 9474)));
+        assert_eq!(parse_summon_owner_048d(&hex("048DF1FE0200000000F1FE02")), None);
+        assert_eq!(parse_summon_owner_048d(&hex("048DF1FE0200000000")), None);
+    }
+
 
     #[test]
     fn decodes_captured_zero_hp_update() {
         // Captured 00 8D zero-HP form recorded in docs/PACKETS-cp-deaths.md.
         let packet = [0x00, 0x8D, 0x8C, 0x95, 0x04, 0x02, 0x01, 0, 0, 0, 0, 0];
         assert_eq!(parse_remain_hp_fields(&packet, 2), Some((68_236, 0)));
+    }
+
+    #[test]
+    fn decodes_absolute_hp_without_reading_a_maximum_from_the_tail() {
+        // Synthetic nonzero update, following the captured 00 8D layout.
+        let mut packet = vec![0x00, 0x8D, 0x8C, 0x95, 0x04, 0x02, 0x01, 0x00];
+        packet.extend_from_slice(&37_500_000u32.to_le_bytes());
+        packet.extend_from_slice(&100_000_000u32.to_le_bytes());
+        assert_eq!(parse_remain_hp_fields(&packet, 2), Some((68_236, 37_500_000)));
+        for length in 0..12 {
+            assert_eq!(parse_remain_hp_fields(&packet[..length], 2), None);
+        }
+        packet[8..12].copy_from_slice(&1_000_000_001u32.to_le_bytes());
+        assert_eq!(parse_remain_hp_fields(&packet, 2), None);
     }
 }

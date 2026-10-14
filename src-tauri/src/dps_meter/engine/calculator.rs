@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::dps_meter::models::combat::{
     ActorInfo, BuffInterval, BuffSummary, CombatInfos, CombatSnapshot, PlayerHpInfo,
-    PlayerOverviewStat, PvpDamageOverviewStat, SkillStats, TargetInfo,
+    PacketHp, PlayerOverviewStat, PvpDamageOverviewStat, SkillStats, TargetInfo,
 };
 use crate::dps_meter::storage::data_storage::DataStorage;
 
@@ -105,9 +105,7 @@ fn build_combat_snapshot(
     let healing_by_target = data_storage.healing_by_target_snapshot();
     for (target_id, players) in &mut per_target_overview {
         let target_duration = target_infos.get(target_id).map(|target| {
-            let start = target.target_start_time.values().copied().reduce(f64::min).unwrap_or(0.0);
-            let end = target.target_last_time.values().copied().reduce(f64::max).unwrap_or(start);
-            (end - start).max(1.0)
+            target.duration_seconds().max(1.0)
         }).unwrap_or(1.0);
         if let Some(healers) = healing_by_target.get(target_id) {
             for (actor_id, heal_total) in healers {
@@ -356,6 +354,9 @@ fn build_target_infos(
 ) -> HashMap<u32, TargetInfo> {
     let mob_id_code = data_storage.mob_id_code_snapshot();
     let mob_id_hp = data_storage.mob_id_hp_snapshot();
+    let decoded_max_hp = data_storage.mob_max_hp_snapshot();
+    let death_times = data_storage.target_death_snapshot();
+    let now = current_timestamp_seconds();
     let start_times = merge_time_map_min(
         &data_storage.start_time_by_target_snapshot(),
         summon_owner_map,
@@ -393,8 +394,19 @@ fn build_target_infos(
                     is_boss,
                     current_hp: cur_hp,
                     max_hp,
+                    // 00 8D decodes current HP only. The stored peak is not max HP.
+                    packet_hp: cur_hp.map(|hp| PacketHp { hp: Some(hp), max_hp: decoded_max_hp.get(tid).copied() }),
                     target_start_time: start_times.get(tid).cloned().unwrap_or_default(),
                     target_last_time: last_times.get(tid).cloned().unwrap_or_default(),
+                    elapsed_at: Some(now),
+                    stopped_at: death_times.get(tid).copied().or_else(|| {
+                        let last = last_times.get(tid)?.values().copied().reduce(f64::max)?;
+                        let idle = if is_boss { 90.0 } else {
+                            std::env::var("DBAION2_FIGHT_IDLE_SECONDS").ok().and_then(|s| s.parse::<f64>().ok())
+                                .filter(|v| v.is_finite()).unwrap_or(6.0).clamp(3.0, 30.0)
+                        };
+                        (now >= last + idle).then_some(last + idle)
+                    }),
                 },
             )
         })
@@ -410,7 +422,10 @@ fn build_actor_infos(
     stats: &HashMap<u32, HashMap<u32, HashMap<u32, SkillStats>>>,
     summon_owner_map: &HashMap<u32, u32>,
 ) -> HashMap<u32, ActorInfo> {
-    let id_name = data_storage.actor_id_name_snapshot();
+    let mut id_name = data_storage.actor_id_name_snapshot();
+    let mobs = data_storage.mob_id_code_snapshot();
+    let self_id = data_storage.main_actor_id();
+    id_name.retain(|id,_| Some(*id) == self_id || !mobs.contains_key(id));
     let id_server = data_storage.actor_id_server_snapshot();
     let id_class = data_storage.actor_id_class_snapshot();
     let id_combat_power = data_storage.actor_id_combat_power_snapshot();
@@ -505,18 +520,12 @@ fn build_per_target_overview_stats(
         .map(|(tid, player_stats)| {
             let target_info = target_infos.get(tid);
             let max_hp = target_info.and_then(|t| t.max_hp).unwrap_or(0) as f64;
-            let max_last_time = target_info
-                .map(|t| t.target_last_time.values().copied().fold(0.0, f64::max))
-                .unwrap_or(0.0);
             let target_total: u64 = player_stats.values().map(|s| s.total_damage).sum();
 
             let overview: HashMap<u32, PlayerOverviewStat> = player_stats
                 .iter()
                 .map(|(pid, stats)| {
-                    let start = target_info
-                        .and_then(|t| t.target_start_time.get(pid).copied())
-                        .unwrap_or(max_last_time);
-                    let duration = (max_last_time - start).max(1.0);
+                    let duration = target_info.map(|t| t.duration_seconds().max(1.0)).unwrap_or(1.0);
                     let dps = stats.total_damage as f64 / duration;
                     let damage_share = if target_total > 0 {
                         stats.total_damage as f64 / target_total as f64
@@ -796,3 +805,20 @@ fn current_timestamp_millis() -> u64 {
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod common_duration_105_tests {
+    use super::*;
+    #[test]
+    fn participants_use_one_encounter_clock_even_when_joining_later() {
+        let actors=HashMap::from([(1,SkillStats { total_damage:1000,..SkillStats::new() }),(2,SkillStats {total_damage:500,..SkillStats::new()})]);
+        let record: crate::dps_meter::history::HistoryRecord = serde_json::from_str(include_str!("../../../tests/fixtures/target-hp-history-record.json")).unwrap();
+        let mut target = record.target_info.unwrap();
+        target.target_last_time=HashMap::from([(1,10.0),(2,10.0)]);
+        target.target_start_time=HashMap::from([(1,0.0),(2,8.0)]);
+        let output=build_per_target_overview_stats(&HashMap::from([(99,actors)]),&HashMap::from([(99,target)]),&HashMap::new());
+        assert_eq!(output[&99][&1].dps,100.0);
+        assert_eq!(output[&99][&2].dps,50.0);
+    }
+}
+

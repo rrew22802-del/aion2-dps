@@ -2,7 +2,7 @@
 //! if it is already installed on this machine.
 //!
 //! This app and Farm Tracker Pro are two different processes on purpose (see
-//! docs/DBAION2.md): DBAion2 DPS is GPL-3.0 and this repo carries none of the
+//! docs/DBAION2.md): TeamMate DPS is GPL-3.0 and this repo carries none of the
 //! tracker's code, so the only thing this module can do is *find* it, the way
 //! a shortcut would. Detection is best-effort: it checks a short list of
 //! install locations rather than a registry uninstall key, so it has not been

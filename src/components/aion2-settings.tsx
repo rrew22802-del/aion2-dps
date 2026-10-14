@@ -628,7 +628,7 @@ export function Aion2Settings() {
                 Detected automatically
               </h3>
               <p className="text-muted-foreground text-xs leading-5">
-                DBAion2 DPS finds the game&apos;s connection, your character, and the server on
+                TeamMate DPS finds the game&apos;s connection, your character, and the server on
                 its own, on every region. There is nothing to choose and nothing to record by
                 hand.
               </p>
@@ -778,7 +778,7 @@ export function Aion2Settings() {
                   description={t("settings.aion2.unknownPacketStallResyncDelayDesc")}
                 >
                   <RangeControl
-                    min={0}
+                    min={150}
                     max={500}
                     step={10}
                     value={backend.unknownPacketStallResyncDelayMs}

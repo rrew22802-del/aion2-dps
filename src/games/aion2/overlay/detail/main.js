@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { t, setLanguage } from "../../i18n.js";
 import skillsEn from "@/i18n/locales/aion2skills/en.json";
 import skillsKo from "@/i18n/locales/aion2skills/ko.json";
+import buffMetadata from "@/i18n/locales/aion2skills/buff_metadata.json";
 import skillsRu from "@/i18n/locales/aion2skills/ru.json";
 import serversData from "@/games/aion2/data/servers.json";
 
@@ -24,17 +25,56 @@ const $playerName = document.getElementById("player-name");
 const $playerServer = document.getElementById("player-server");
 const $playerPower = document.getElementById("player-power");
 const $playerPowerText = document.getElementById("player-power-text");
+const $closeStatus = document.getElementById("close-status");
+const detailWindow = getCurrentWindow();
+let lastCloseOperation = Promise.resolve();
 
-document.getElementById("close-btn").addEventListener("click", async () => {
+let currentLanguage = "en";
+let selectionGeneration = 0;
+let snapshotRenderTimer = null;
+let animationFrame = null;
+let lastSnapshotRenderAt = 0;
+let renderPending = false;
+let lastContentMarkup = null;
+let lastContentScope = null;
+let lastRenderDurationMs = 0;
+const SNAPSHOT_RENDER_INTERVAL_MS = 200;
+
+function reportCloseFailure(error) {
+  console.error("[dps-detail] window hide failed:", error);
+  $closeStatus.textContent = t("dps-detail.closeFailed");
+}
+
+async function closeDetailWindow() {
+  $closeStatus.textContent = "";
+  if (animationFrame !== null) window.cancelAnimationFrame(animationFrame);
+  if (snapshotRenderTimer !== null) window.clearTimeout(snapshotRenderTimer);
+  animationFrame = null;
+  snapshotRenderTimer = null;
+  renderPending = false;
   try {
-    await getCurrentWindow().hide();
-  } catch (_) {
-    /* ignore */
+    await detailWindow.hide();
+  } catch (error) {
+    reportCloseFailure(error);
+  }
+}
+
+document.getElementById("close-btn").addEventListener("click", () => {
+  lastCloseOperation = closeDetailWindow();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    lastCloseOperation = closeDetailWindow();
   }
 });
 
-document.getElementById("detail-drag-handle").addEventListener("mousedown", () => {
-  getCurrentWindow().startDragging();
+document.getElementById("detail-drag-handle").addEventListener("mousedown", (event) => {
+  if (event.button !== 0 || event.target.closest("button, a, input, select, textarea")) return;
+  detailWindow.startDragging().catch((error) => {
+    console.warn("[dps-detail] drag start failed:", error);
+  });
 });
 
 // ── State ──
@@ -43,6 +83,7 @@ let selectedActorId = null;
 let selectedTargetId = null;
 let frozenRecord = null;
 let lastSnapshot = null;
+let snapshotGeneration = 0;
 let isPlayerBuffPanelOpen = false;
 let isBossBuffPanelOpen = false;
 
@@ -153,8 +194,9 @@ function renderBuffTimeline(buffs, dataSource) {
     .map((buff) => {
       const skillCode = Number(buff.skillCode);
       if (!Number.isFinite(skillCode)) return null;
-      const name = skillName(buff.skillCode);
-      const icon = skillIcon(buff.skillCode);
+      const metadata = buffMetadata[String(buff.skillCode)];
+      const name = metadata?.[currentSkills === skillsRu ? "ru" : "en"] || skillName(buff.skillCode);
+      const icon = metadata?.icon ? "/aion2/buff/" + metadata.icon + ".png" : skillIcon(buff.skillCode);
       const casterInfo = getActorInfo(dataSource, buff.actorId);
       const caster = getActorLabel(dataSource, buff.actorId);
       const casterIcon = getClassIcon(casterInfo?.actorClass);
@@ -236,6 +278,140 @@ function setMode(m) {
   mode = m;
   $modeBadge.textContent = mode === "history" ? t("dps-overlay.history") : t("dps-overlay.live");
   $modeBadge.className = "titlebar__mode " + (mode === "history" ? "is-history" : "is-live");
+}
+
+function requestRender(immediate = false) {
+  renderPending = true;
+  if (immediate) {
+    if (snapshotRenderTimer !== null) {
+      clearTimeout(snapshotRenderTimer);
+      snapshotRenderTimer = null;
+    }
+  } else if (snapshotRenderTimer !== null) {
+    return;
+  } else {
+    const wait = Math.max(0, SNAPSHOT_RENDER_INTERVAL_MS - (performance.now() - lastSnapshotRenderAt));
+    if (wait > 0) {
+      snapshotRenderTimer = window.setTimeout(() => {
+        snapshotRenderTimer = null;
+        requestRender(true);
+      }, wait);
+      return;
+    }
+  }
+  if (animationFrame !== null) return;
+  animationFrame = window.requestAnimationFrame(() => {
+    animationFrame = null;
+    if (!renderPending) return;
+    renderPending = false;
+    const startedAt = performance.now();
+    try {
+      render();
+    } catch (error) {
+      console.error("[dps-detail] render failed:", error);
+      $content.innerHTML = `<div class="empty">${t("dps-detail.noData")}</div>`;
+    } finally {
+      lastSnapshotRenderAt = performance.now();
+      const elapsed = lastSnapshotRenderAt - startedAt;
+      lastRenderDurationMs = elapsed;
+      if (elapsed >= 50) console.warn(`[dps-detail] slow render: ${elapsed.toFixed(1)}ms`);
+    }
+  });
+}
+
+function applySelection(payload) {
+  if (!payload || !payload.actorId) return;
+  selectionGeneration += 1;
+  selectedActorId = payload.actorId;
+  selectedTargetId = payload.targetId ?? null;
+  mode = payload.mode || "live";
+  frozenRecord = mode === "history" ? payload.record || null : null;
+  requestRender(true);
+  if (payload.diagnostic === true) void runWindowDiagnostic();
+}
+
+let diagnosticStarted = false;
+async function runWindowDiagnostic() {
+  if (diagnosticStarted) return;
+  diagnosticStarted = true;
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    await invoke("detail_diagnostic_stage", { stage: "begin" });
+    await wait(500);
+    await invoke("detail_diagnostic_stage", { stage: "initial-render" });
+    const rendered = $playerName.textContent === "Example player" && $content.querySelector(".empty") === null;
+    const initialRenderMs = lastRenderDurationMs;
+    const originalTable = $content.querySelector(".skill-table");
+    const previousMarkup = lastContentMarkup;
+    const previousScope = lastContentScope;
+    render();
+    const unchangedDomReused = $content.querySelector(".skill-table") === originalTable;
+    let firstDifference = -1;
+    if (previousMarkup !== lastContentMarkup) {
+      for (let index = 0; index < Math.max(previousMarkup?.length || 0, lastContentMarkup?.length || 0); index += 1) {
+        if (previousMarkup?.[index] !== lastContentMarkup?.[index]) { firstDifference = index; break; }
+      }
+    }
+    const domChange = unchangedDomReused ? null : {
+      scopeChanged: previousScope !== lastContentScope,
+      firstDifference,
+      before: previousMarkup?.slice(Math.max(0, firstDifference - 20), firstDifference + 50),
+      after: lastContentMarkup?.slice(Math.max(0, firstDifference - 20), firstDifference + 50),
+    };
+    $content.scrollTop = 120;
+    const beforeScroll = $content.scrollTop;
+    const initialSkillScroll = $content.querySelector(".skill-table-scroll");
+    initialSkillScroll.scrollTop = 120;
+    const beforeSkillScroll = initialSkillScroll.scrollTop;
+    frozenRecord.playerSkillStats[selectedActorId]["10000000"].totalDamage += 1;
+    render();
+    const changedDomUpdated = $content.querySelector(".skill-table") !== originalTable;
+    const scrollPreserved = beforeSkillScroll > 0 && $content.scrollTop === beforeScroll
+      && $content.querySelector(".skill-table-scroll").scrollTop === beforeSkillScroll;
+    lastSnapshot = {
+      combatInfos: frozenRecord.combatInfos,
+      byTargetPlayerStats: { [frozenRecord.targetId]: frozenRecord.playerStats },
+      byTargetPlayerSkillStats: { [frozenRecord.targetId]: frozenRecord.playerSkillStats },
+    };
+    selectedTargetId = frozenRecord.targetId;
+    mode = "live";
+    render();
+    const liveRendered = $playerName.textContent === "Example player" && $content.querySelector(".skill-table") !== null;
+    let snapshotPending = true;
+    const slowSnapshot = invoke("get_last_snapshot").finally(() => { snapshotPending = false; });
+    const started = performance.now();
+    await wait(50);
+    const heartbeatMs = performance.now() - started;
+    const closeStartedAt = performance.now();
+    document.getElementById("close-btn").click();
+    await invoke("detail_diagnostic_stage", { stage: "close-clicked" });
+    await lastCloseOperation;
+    const buttonClosed = !(await detailWindow.isVisible());
+    const closeDuringSnapshotMs = performance.now() - closeStartedAt;
+    const closedWhileSnapshotPending = snapshotPending;
+    await invoke("detail_diagnostic_stage", { stage: "button-closed" });
+    await detailWindow.show();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await lastCloseOperation;
+    const escapeClosed = !(await detailWindow.isVisible());
+    await invoke("detail_diagnostic_stage", { stage: "escape-closed" });
+    let repeatedCloseCycles = 0;
+    for (let cycle = 0; cycle < 10; cycle += 1) {
+      await detailWindow.show();
+      await invoke("detail_diagnostic_stage", { stage: `cycle-${cycle}-shown` });
+      document.getElementById("close-btn").click();
+      await lastCloseOperation;
+      if (await detailWindow.isVisible()) break;
+      repeatedCloseCycles += 1;
+    }
+    // WebView may defer async IPC callbacks while hidden. Reopen through its
+    // native API before awaiting the test reply; never rely on hidden timers.
+    await detailWindow.show();
+    await slowSnapshot;
+    await invoke("detail_diagnostic_report", { report: { rendered, liveRendered, unchangedDomReused, domChange, changedDomUpdated, scrollPreserved, scrollPixels: beforeSkillScroll, initialRenderMs, heartbeatMs, buttonClosed, escapeClosed, repeatedCloseCycles, closedWhileSnapshotPending, closeDuringSnapshotMs } });
+  } catch (error) {
+    await invoke("detail_diagnostic_report", { report: { error: String(error) } });
+  }
 }
 
 function render() {
@@ -323,6 +499,7 @@ function render() {
   }
 
   // Titlebar
+  playerNameText = actorInfo?.actorName || playerStats?.actorName || playerNameText;
   setMode(mode);
   $playerName.textContent = playerNameText;
   $playerServer.textContent = playerServer ? `[${playerServer}]` : "";
@@ -463,7 +640,19 @@ function render() {
     fightStart,
   });
   html += `</div>`;
+  const scope = `${mode}:${selectedActorId}:${currentTargetId ?? ""}:${frozenRecord?.id ?? ""}`;
+  if (scope === lastContentScope && html === lastContentMarkup && $content.firstChild) return;
+  const keepScroll = scope === lastContentScope;
+  const scrollTop = keepScroll ? $content.scrollTop : 0;
+  const oldSkillScroll = $content.querySelector(".skill-table-scroll");
+  const skillTop = keepScroll ? oldSkillScroll?.scrollTop || 0 : 0;
+  const skillLeft = keepScroll ? oldSkillScroll?.scrollLeft || 0 : 0;
   $content.innerHTML = html;
+  lastContentMarkup = html;
+  lastContentScope = scope;
+  $content.scrollTop = scrollTop;
+  const newSkillScroll = $content.querySelector(".skill-table-scroll");
+  if (newSkillScroll) { newSkillScroll.scrollTop = skillTop; newSkillScroll.scrollLeft = skillLeft; }
   $content.querySelectorAll(".buff-panel").forEach((panel) => {
     panel.addEventListener("toggle", (event) => {
       const panelId = event.currentTarget.dataset.buffPanel;
@@ -476,80 +665,76 @@ function render() {
   });
 }
 
-// ── Init ──
-(async function init() {
-  try {
-    const lang = await invoke("get_language");
-    setLanguage(lang);
-    currentSkills = SKILLS[lang] || skillsEn;
-  } catch (e) {
-    console.error("[dps-detail] get_language failed:", e);
-  }
-
-  // Pull last snapshot as fallback (in case combat already ended)
-  try {
-    const snap = await invoke("get_last_snapshot");
-    if (snap) lastSnapshot = snap;
-  } catch (_) {
-    /* ignore */
-  }
-
-  // Pull pending selection (written before window was created)
-  try {
-    const selection = await invoke("get_detail_selection");
-    console.log("[dps-detail] init selection:", JSON.stringify(selection));
-    if (selection && selection.actorId) {
-      selectedActorId = selection.actorId;
-      selectedTargetId = selection.targetId ?? null;
-      mode = selection.mode || "live";
-      console.log("[dps-detail] init mode:", mode, "actorId:", selectedActorId);
-      if (mode === "history") {
-        frozenRecord = selection.record || null;
-      }
-      render();
-    }
-  } catch (_) {
-    /* ignore */
-  }
-
-  // Init titlebar + empty text (set before render() replaces the .empty element)
-  const $emptyEl = document.querySelector(".empty");
-  if ($emptyEl) $emptyEl.textContent = t("dps-detail.empty");
-  document.getElementById("close-btn").title = t("dps-detail.close");
-  document.getElementById("close-btn").setAttribute("aria-label", t("dps-detail.close"));
-  $modeBadge.textContent = t("dps-overlay.live");
-  $modeBadge.className = "titlebar__mode is-live";
-
+// Register listeners before any IPC awaits so a selection that arrives during
+// startup cannot be lost. Snapshot handlers only keep the newest value; render
+// work is coalesced below and never delays close/drag controls.
+const listenersReady = Promise.all([
   listen("language-changed", (event) => {
-    setLanguage(event.payload.language);
-    currentSkills = SKILLS[event.payload.language] || skillsEn;
+    currentLanguage = event.payload.language;
+    setLanguage(currentLanguage);
+    currentSkills = SKILLS[currentLanguage] || skillsEn;
     document.getElementById("close-btn").title = t("dps-detail.close");
     document.getElementById("close-btn").setAttribute("aria-label", t("dps-detail.close"));
-    render();
-  });
-
+    requestRender(true);
+  }),
   listen("dps-snapshot", (event) => {
+    snapshotGeneration += 1;
     lastSnapshot = event.payload;
-    if (mode === "live" && selectedActorId) render();
-  });
-
+    if (mode === "live" && selectedActorId) requestRender();
+  }),
   listen("select-player-detail", async (event) => {
-    console.log("[dps-detail] event received:", JSON.stringify(event.payload));
-    let payload = event.payload;
-    if (!payload || !payload.actorId) {
+    const payload = event.payload;
+    if (payload?.actorId) {
+      applySelection(payload);
+      return;
+    }
+    const generation = ++selectionGeneration;
+    try {
+      const latest = await invoke("get_detail_selection");
+      if (generation === selectionGeneration) applySelection(latest);
+    } catch (error) {
+      console.error("[dps-detail] get_detail_selection failed:", error);
+    }
+  }),
+]).catch((error) => {
+  console.error("[dps-detail] event listener setup failed:", error);
+});
+
+// ── Init ──
+(async function init() {
+  document.getElementById("close-btn").title = t("dps-detail.close");
+  document.getElementById("close-btn").setAttribute("aria-label", t("dps-detail.close"));
+  const $emptyEl = document.querySelector(".empty");
+  if ($emptyEl) $emptyEl.textContent = t("dps-detail.empty");
+
+  try {
+    await listenersReady;
+    try {
+      currentLanguage = await invoke("get_language");
+      setLanguage(currentLanguage);
+      currentSkills = SKILLS[currentLanguage] || skillsEn;
+    } catch (error) {
+      console.error("[dps-detail] get_language failed:", error);
+    }
+
+    const generation = selectionGeneration;
+    try {
+      const selection = await invoke("get_detail_selection");
+      if (selectionGeneration === generation) applySelection(selection);
+    } catch (error) {
+      console.error("[dps-detail] initial selection failed:", error);
+    }
+    if (mode === "live") {
+      const capturedGeneration = snapshotGeneration;
       try {
-        payload = await invoke("get_detail_selection");
-        console.log("[dps-detail] fallback get_detail_selection:", JSON.stringify(payload));
-      } catch (_) {
-        /* ignore */
+        const snap = await invoke("get_last_snapshot");
+        if (snap && capturedGeneration === snapshotGeneration) lastSnapshot = snap;
+      } catch (error) {
+        console.error("[dps-detail] get_last_snapshot failed:", error);
       }
     }
-    if (!payload || !payload.actorId) return;
-    selectedActorId = payload.actorId;
-    selectedTargetId = payload.targetId ?? null;
-    mode = payload.mode || "live";
-    console.log("[dps-detail] event mode:", mode, "actorId:", selectedActorId);
-    if (mode === "history") frozenRecord = payload.record || null;
-    render();
-  });
+    requestRender(true);
+  } catch (error) {
+    console.error("[dps-detail] initialization failed:", error);
+  }
 })();

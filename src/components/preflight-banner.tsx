@@ -39,7 +39,7 @@ type InstallOutcome = {
 };
 
 // This build's own releases, not upstream Aether's -- a reinstall has to
-// fetch the DBAion2 DPS installer, which is what actually bundles the driver
+// fetch the TeamMate DPS installer, which is what actually bundles the driver
 // this check is complaining about.
 const RELEASES_URL = "https://github.com/rrew22802-del/aion2-dps/releases/latest";
 
@@ -216,7 +216,7 @@ export function PreflightBanner() {
         <div className="min-w-0 flex-1">
           <p className="text-foreground truncate text-xs font-medium">
             {checking
-              ? "Checking what DBAion2 DPS needs"
+              ? "Checking what TeamMate DPS needs"
               : (report?.summary ?? failure ?? "The environment check could not run")}
           </p>
         </div>

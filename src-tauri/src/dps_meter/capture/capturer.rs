@@ -751,7 +751,7 @@ fn detect_ip_offset(frame: &[u8]) -> Option<usize> {
         if ether_type == 0x0800 {
             return Some(14);
         }
-        if frame[0] == 2 && frame[1] == 0 && frame[2] == 0 && frame[3] == 0 {
+        if frame[..4] == [2, 0, 0, 0] || frame[..4] == [0, 0, 0, 2] {
             return Some(4);
         }
     }
@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn parses_game_magic_from_raw_ip_ethernet_and_loopback_null_frames() {
-        for prefix in [&[][..], &[0, 0, 0, 2][..], &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 8, 0][..]] {
+        for prefix in [&[][..], &[0, 0, 0, 2][..], &[2, 0, 0, 0][..], &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 8, 0][..]] {
             let frame = ipv4_tcp_frame(prefix, 54745, &[0x0e, 0x00, 0x36, 1]);
             let packet = parse_frame(&frame);
             assert!(packet.data.starts_with(&MAGIC_PATTERN));
@@ -839,11 +839,13 @@ mod tests {
             CapturedPacket { src_ip: [172,19,0,1], src_port: 54745, dst_ip: [193,202,112,113], dst_port: 13328, sequence: 1, data: vec![0x0e,0,0x36], captured_at: 0.0 },
         ];
         assert!(!packets[0].data.starts_with(&MAGIC_PATTERN));
-        let chosen = choose_target(&[physical, tunnel], &[
+        let candidates = [physical, tunnel];
+        let detections = [
             DeviceDetection { device_name: "\\Device\\Physical".into(), flow: "193.202.112.113:13328->172.19.0.1:54745".into(), hits: MAGIC_MIN_HITS },
             DeviceDetection { device_name: "\\Device\\Happ".into(), flow: "193.202.112.113:13328->172.19.0.1:54745".into(), hits: MAGIC_MIN_HITS },
             DeviceDetection { device_name: "\\Device\\Happ".into(), flow: "50000-443".into(), hits: 0 },
-        ]).unwrap();
+        ];
+        let chosen = choose_target(&candidates, &detections).unwrap();
         assert_eq!(chosen.device_name, "\\Device\\Happ");
         assert_eq!(chosen.flow, "193.202.112.113:13328->172.19.0.1:54745");
     }

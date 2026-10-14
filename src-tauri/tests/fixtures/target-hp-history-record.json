@@ -1,0 +1,85 @@
+{
+  "id": "9001-1790000000000",
+  "targetId": 9001,
+  "totalDamage": 1234567,
+  "targetInfo": {
+    "id": 9001,
+    "targetMobCode": 2400017,
+    "targetName": "Example boss",
+    "isBoss": true,
+    "currentHp": 37500000,
+    "maxHp": 100000000,
+    "packetHp": {
+      "hp": 37500000,
+      "maxHp": null
+    },
+    "targetStartTime": {
+      "16450": 1790000000
+    },
+    "targetLastTime": {
+      "16450": 1790000042.5
+    }
+  },
+  "combatInfos": {
+    "actorInfos": {},
+    "targetInfos": {
+      "9001": {
+        "id": 9001,
+        "targetMobCode": 2400017,
+        "targetName": "Example boss",
+        "isBoss": true,
+        "currentHp": 37500000,
+        "maxHp": 100000000,
+        "packetHp": {
+          "hp": 37500000,
+          "maxHp": null
+        },
+        "targetStartTime": {
+          "16450": 1790000000
+        },
+        "targetLastTime": {
+          "16450": 1790000042.5
+        }
+      }
+    },
+    "mainActorId": 16450,
+    "mainActorName": "Example player",
+    "lastTargetByMainActor": 9001,
+    "lastTarget": 9001,
+    "timeNow": 1790000042.5
+  },
+  "playerSkillStats": {},
+  "playerStats": {
+    "16450": {
+      "actorId": 16450,
+      "actorName": "Example player",
+      "actorServerId": "",
+      "actorClass": "GLADIATOR",
+      "combatPower": null,
+      "counts": 140,
+      "totalDamage": 1234567,
+      "minDamage": 1,
+      "maxDamage": 5120,
+      "specialCounts": {
+        "CRITICAL": 35
+      },
+      "dps": 29048.63529411765,
+      "damageShare": 1,
+      "damageContribution": 0.01234567,
+      "healTotal": 0,
+      "hps": 0,
+      "deaths": 0
+    }
+  },
+  "summonOwnerIds": [],
+  "partyMemberIds": [
+    16450
+  ],
+  "useBuffsByTarget": {},
+  "createdAt": 1790000042500,
+  "combatEvents": [],
+  "buffIntervals": {},
+  "damageTaken": {},
+  "deathRecaps": [],
+  "bossCasts": []
+}

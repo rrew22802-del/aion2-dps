@@ -18,6 +18,7 @@ const KNOWN_PACKET_HEADERS: &[(u8, u8)] = &[
     (0x45, 0x38),
     (0x56, 0x36),
     (0x41, 0x36),
+    (0x42, 0x36),
     (0x04, 0x38),
     (0x05, 0x38),
     (0x2A, 0x38),
@@ -59,7 +60,7 @@ fn resolve_packet_prefix(packet: &[u8], length_offset: usize) -> Option<PacketPr
 fn inspect_stall_candidate(buffer: &[u8]) -> StallCandidate {
     let length_info = read_varint(buffer, 0);
     let declared_packet_len = if length_info.is_valid() && length_info.value > 0 {
-        usize::try_from(length_info.value.saturating_sub(3)).ok()
+        transport_packet_size(length_info.value, length_info.length)
     } else {
         None
     };
@@ -77,6 +78,7 @@ fn inspect_stall_candidate(buffer: &[u8]) -> StallCandidate {
     StallCandidate {
         declared_packet_len,
         opcode,
+        buffered: buffer.len(),
     }
 }
 
@@ -96,6 +98,9 @@ enum StallResyncMode {
 struct StallCandidate {
     declared_packet_len: Option<usize>,
     opcode: Option<(u8, u8)>,
+    /// owner 12.10: bytes already here — while the tail keeps arriving the candidate changes and the wait starts over,
+    /// so a packet still being written (1 818 → 2 965 of 4 244) is not dropped after a fixed delay
+    buffered: usize,
 }
 
 pub struct StreamProcessor {
@@ -155,10 +160,6 @@ impl StreamProcessor {
 
     pub fn consume_stream(&mut self, buffer: &[u8]) -> usize {
         let mut offset = 0usize;
-        let max_packet_size_threshold = {
-            let config = self.config.read().unwrap();
-            usize::try_from(config.max_packet_size_threshold).unwrap_or(8 * 1024)
-        };
 
         while offset < buffer.len() {
             if buffer[offset] == 0x00 {
@@ -175,7 +176,7 @@ impl StreamProcessor {
                 continue;
             }
 
-            let Ok(total_packet_bytes) = usize::try_from(length_info.value.saturating_sub(3))
+            let Some(total_packet_bytes) = transport_packet_size(length_info.value, length_info.length)
             else {
                 offset += 1;
                 continue;
@@ -187,18 +188,8 @@ impl StreamProcessor {
             }
 
             if offset + total_packet_bytes > buffer.len() {
-                // let candidate = inspect_stall_candidate(&buffer[offset..]);
-                // let is_explicitly_unknown = candidate
-                //     .opcode
-                //     .is_some_and(|opcode| !KNOWN_PACKET_HEADERS.contains(&opcode));
-                // if is_explicitly_unknown && total_packet_bytes > max_packet_size_threshold {
-                //     offset += 1;
-                //     continue;
-                // }
-                if total_packet_bytes > max_packet_size_threshold {
-                    offset += 1;
-                    continue;
-                }
+                // TCP may split any legal frame. Wait for its tail rather than
+                // treating embedded payload bytes as fresh length fields.
                 break;
             }
 
@@ -214,7 +205,7 @@ impl StreamProcessor {
                 && current_packet[payload_start + 1] == 0xFF;
 
             if is_bundle {
-                let bundle_size = total_packet_bytes + 1;
+                let bundle_size = total_packet_bytes;
                 if offset + bundle_size > buffer.len() {
                     break;
                 }
@@ -304,62 +295,7 @@ impl StreamProcessor {
     }
 
     fn unwrap_bundle(&mut self, payload: &[u8]) {
-        if payload.len() < 7 {
-            return;
-        }
-
-        let decompressed_size =
-            u32::from_le_bytes([payload[2], payload[3], payload[4], payload[5]]) as usize;
-        if decompressed_size == 0 || decompressed_size > 5_000_000 {
-            return;
-        }
-
-        let Ok(decompressed) = decompress(&payload[6..], decompressed_size) else {
-            return;
-        };
-
-        let mut offset = 0usize;
-        while offset < decompressed.len() {
-            if decompressed[offset] == 0x00 {
-                offset += 1;
-                continue;
-            }
-
-            let length_info = read_varint(&decompressed, offset);
-            if !length_info.is_valid() || length_info.value <= 0 {
-                break;
-            }
-
-            let Ok(inner_total_bytes) = usize::try_from(length_info.value.saturating_sub(3)) else {
-                break;
-            };
-            if inner_total_bytes == 0 {
-                offset += 1;
-                continue;
-            }
-
-            let inner_end = offset + inner_total_bytes;
-            if inner_end > decompressed.len() {
-                break;
-            }
-
-            let inner_packet = &decompressed[offset..inner_end];
-            let Some(prefix_info) = resolve_packet_prefix(inner_packet, length_info.length) else {
-                break;
-            };
-            let inner_payload_start = prefix_info.payload_offset;
-            let is_nested_bundle = inner_packet.len() > inner_payload_start + 1
-                && inner_packet[inner_payload_start] == 0xFF
-                && inner_packet[inner_payload_start + 1] == 0xFF;
-
-            if is_nested_bundle {
-                self.unwrap_bundle(&inner_packet[inner_payload_start..]);
-            } else {
-                self.parse_packet(inner_packet, true);
-            }
-
-            offset += inner_total_bytes;
-        }
+        visit_bundle_packets(payload, 0, &mut |packet| { self.parse_packet(packet, true); });
     }
 
     fn parse_packet(&mut self, packet: &[u8], is_compressed_bundle: bool) -> bool {
@@ -403,6 +339,14 @@ impl StreamProcessor {
                     is_compressed_bundle,
                 ),
                 (0x41, 0x36) => self.parse_summon_packet(payload, is_compressed_bundle),
+                (0x42, 0x36) => {
+                    if let Some(dead) = death_entity(payload) {
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64()).unwrap_or_default();
+                        self.data_storage.mark_target_dead(dead, now);
+                        true
+                    } else { false }
+                },
                 (0x04, 0x38) if self.combat_damage_enabled => {
                     self.parse_damage_packet(payload, is_compressed_bundle)
                 }
@@ -465,5 +409,118 @@ impl StreamProcessor {
 
     fn parser_context(&self) -> ParserContext<'_> {
         ParserContext::new(&self.data_storage, &self.logger, &self.port)
+    }
+}
+
+fn death_entity(payload: &[u8]) -> Option<u32> {
+    if payload.get(..2)? != [0x42, 0x36] { return None; }
+    let dead=read_varint(payload,2);
+    let killer=read_varint(payload,2+dead.length);
+    let flag=read_varint(payload,2+dead.length+killer.length);
+    (dead.is_valid() && killer.is_valid() && flag.is_valid() && dead.value>0)
+        .then(||u32::try_from(dead.value).ok()).flatten()
+}
+
+// Transport length includes four virtual bytes, independently of varint width.
+fn transport_packet_size(value: i64, width: usize) -> Option<usize> {
+    usize::try_from(value.checked_add(i64::try_from(width).ok()?)?.checked_sub(4)?).ok().filter(|size| *size >= 3 && *size <= 65_535)
+}
+
+fn visit_bundle_packets(payload: &[u8], depth: usize, visit: &mut impl FnMut(&[u8])) {
+    if payload.len() < 7 || depth >= 8 { return; }
+    let expected = u32::from_le_bytes(payload[2..6].try_into().unwrap()) as usize;
+    if expected == 0 || expected > 5_000_000 { return; }
+    let Ok(data) = decompress(&payload[6..], expected) else { return; };
+    let mut at = 0;
+    while at < data.len() {
+        if data[at] == 0 { at += 1; continue; }
+        let length = read_varint(&data, at);
+        if !length.is_valid() { break; }
+        let Some(size) = transport_packet_size(length.value, length.length) else { break; };
+        let Some(packet) = data.get(at..at + size) else { break; };
+        let Some(prefix) = resolve_packet_prefix(packet, length.length) else { break; };
+        if packet.get(prefix.payload_offset..prefix.payload_offset + 2) == Some(&[0xff, 0xff]) {
+            visit_bundle_packets(&packet[prefix.payload_offset..], depth + 1, visit);
+        } else { visit(packet); }
+        at += size;
+    }
+}
+
+#[cfg(test)]
+mod framing_regressions {
+    use super::*;
+    fn var(mut n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop { let byte = (n & 127) as u8; n >>= 7; out.push(byte | if n > 0 {128} else {0}); if n == 0 {return out;} }
+    }
+    fn frame(value: usize) -> Vec<u8> {
+        let mut bytes=var(value); bytes.extend([0x01,0x91]); bytes.resize(value + var(value).len() - 4, 0x55); bytes
+    }
+    fn fixture(name: &str) -> Vec<u8> {
+        let json: serde_json::Value=serde_json::from_str(include_str!("../../../tests/fixtures/native-transport.json")).unwrap();
+        let text=json[name].as_str().unwrap(); (0..text.len()).step_by(2).map(|i|u8::from_str_radix(&text[i..i+2],16).unwrap()).collect()
+    }
+    #[test]
+    fn varint_boundary_sizes_preserve_small_packets() {
+        for value in [127usize,128,16383,16384] {
+            let packet=frame(value); let len=read_varint(&packet,0);
+            assert_eq!(transport_packet_size(len.value,len.length),Some(packet.len()),"encoded={value}");
+            assert_eq!(inspect_stall_candidate(&packet).declared_packet_len,Some(packet.len()));
+        }
+    }
+    #[test]
+    fn split_tcp_never_dispatches_a_multibyte_frame_before_its_tail() {
+        for value in [128usize,16384] {
+            let packet=frame(value);
+            for split in 1..packet.len() {
+                let info=read_varint(&packet[..split],0);
+                if info.is_valid() { assert!(transport_packet_size(info.value,info.length).unwrap()>split); }
+            }
+        }
+    }
+    #[test]
+    fn real_login_resource_multibyte_frame_keeps_all_73_records() {
+        let packet=fixture("0b61");let len=read_varint(&packet,0);
+        let size=transport_packet_size(len.value,len.length).unwrap();
+        assert_eq!(size,packet.len());assert_eq!(&packet[len.length..len.length+3],&[0x0b,0x61,73]);
+    }
+    #[test]
+    fn real_outer_bundle_preserves_child_boundaries_and_the_following_hp() {
+        let packet=fixture("bundle");let len=read_varint(&packet,0);
+        let size=transport_packet_size(len.value,len.length).unwrap();
+        assert_eq!(size,packet.len());
+        let mut opcodes=Vec::new();
+        visit_bundle_packets(&packet[len.length..size],0,&mut |child| {
+            let length=read_varint(child,0);let prefix=resolve_packet_prefix(child,length.length).unwrap();
+            opcodes.push(child[prefix.payload_offset..prefix.payload_offset+2].to_vec());
+        });
+        assert!(opcodes.len()>1);
+        let hp=fixture("008d");let joined=[packet.as_slice(),hp.as_slice()].concat();
+        assert_eq!(&joined[size..],hp.as_slice());
+    }
+    #[test]
+    fn real_hp_and_death_frames_reach_the_correct_opcode_with_no_truncated_fields() {
+        let hp=fixture("008d");let death=fixture("4236");
+        let joined=[frame(128),hp.clone(),death.clone()].concat();
+        let mut at=0;let mut decoded=Vec::new();
+        while at<joined.len() {
+            let length=read_varint(&joined,at);
+            let size=transport_packet_size(length.value,length.length).unwrap();
+            decoded.push(joined[at+length.length..at+size].to_vec());at+=size;
+        }
+        assert_eq!(decoded.len(),3);
+        assert!(crate::dps_meter::capture::parser::summon::parse_remain_hp_fields(&decoded[1],2).is_some());
+        assert_eq!(death_entity(&decoded[2]),Some(38114));
+        for cut in 0..decoded[2].len() { assert_eq!(death_entity(&decoded[2][..cut]),None); }
+    }
+    #[test]
+    fn compressed_children_cross_two_and_three_byte_lengths_without_losing_zero_hp() {
+        let hp=vec![16,0x00,0x8d,0x8c,0x95,0x04,2,1,0,0,0,0,0];
+        let body=[frame(128),frame(16384),hp.clone()].concat();
+        let mut bundle=vec![0xff,0xff];bundle.extend((body.len() as u32).to_le_bytes());
+        bundle.extend(lz4_flex::block::compress(&body));
+        let mut children=Vec::new();visit_bundle_packets(&bundle,0,&mut |packet|children.push(packet.to_vec()));
+        assert_eq!(children.len(),3);assert_eq!(children[2],hp);
+        assert_eq!(crate::dps_meter::capture::parser::summon::parse_remain_hp_fields(&children[2][1..],2),Some((68236,0)));
     }
 }

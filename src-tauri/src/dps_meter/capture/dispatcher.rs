@@ -626,8 +626,8 @@ mod tests {
 
     #[test]
     fn https_flow_stays_unrecognized_and_is_not_assembled_or_resynced() {
-        let mut hits = HashMap::<String, VecDeque<Instant>>::new();
-        let mut game_flows = HashSet::new();
+        let hits = HashMap::<String, VecDeque<Instant>>::new();
+        let game_flows = HashSet::<String>::new();
         let https_payload = [0x16, 0x03, 0x01, 0, 0x0e, 0, 0x36];
         assert!(!https_payload.starts_with(&MAGIC));
         let flow = "8.6.112.0:443->172.19.0.1:61982";

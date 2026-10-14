@@ -16,7 +16,7 @@ type CreditItem = {
 };
 
 /**
- * DBAion2 DPS is a fork of a fork, and this page says so plainly.
+ * TeamMate DPS is a fork of a fork, and this page says so plainly.
  *
  * Upstream's own page collected donations and community group numbers; those
  * belong to that project and its author, not to this fork, so they are not
@@ -72,7 +72,7 @@ const ARTWORK_CREDITS: CreditItem[] = [
 ];
 
 /**
- * This build's own upstream: DBAion2 DPS is a rebrand of Aether, itself a
+ * This build's own upstream: TeamMate DPS is a rebrand of Aether, itself a
  * fork of NOIA2 (see UPSTREAM above). Aether's animated "Dune" background is
  * not reproduced here — it was not GPL-licensed — so there is nothing to
  * credit for it.
@@ -80,7 +80,7 @@ const ARTWORK_CREDITS: CreditItem[] = [
 const FORK_CREDIT: CreditItem = {
   name: "Helveticxa/Aether-Aion2-DPS-meter-Global",
   description:
-    "DBAion2 DPS is a rebrand of Aether: the capture pipeline, packet parsers and overlay come from that project's own fork of NOIA2.",
+    "TeamMate DPS is a rebrand of Aether: the capture pipeline, packet parsers and overlay come from that project's own fork of NOIA2.",
   href: "https://github.com/Helveticxa/Aether-Aion2-DPS-meter-Global",
   avatarFallback: "AE",
   badge: "This build's base",
@@ -119,7 +119,7 @@ export function SupportAcknowledgementsSettings() {
     <div className="flex flex-col gap-8">
       <SettingsSectionHeader
         title="Credits"
-        description="DBAion2 DPS stands on other people's work. This page records whose."
+        description="TeamMate DPS stands on other people's work. This page records whose."
       />
 
       <SettingsGroup title="Built on">

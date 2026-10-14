@@ -1,0 +1,51 @@
+{
+  "fightId": "9001-1790000000000",
+  "active": true,
+  "startedAt": 1790000000000,
+  "durationSec": 42.5,
+  "target": {
+    "name": "Example boss",
+    "npcId": 2400017,
+    "isBoss": true,
+    "hp": 37500000,
+    "maxHp": null,
+    "hpPct": 37.5
+  },
+  "totalDamage": 1234567,
+  "players": [
+    {
+      "id": 16450,
+      "name": "Example player",
+      "classId": 2,
+      "className": "Gladiator",
+      "classIcon": "aion2/class/gladiator.png",
+      "isSelf": true,
+      "inParty": true,
+      "isSummonOwner": false,
+      "damage": 1234567,
+      "dps": 29048.63529411765,
+      "share": 1.0,
+      "hits": 140,
+      "critRate": 0.25,
+      "maxHit": 5120,
+      "cp": null,
+      "deaths": 0,
+      "healTotal": 0,
+      "hps": 0.0,
+      "damageTaken": 0
+    }
+  ],
+  "targetId": 9001,
+  "pinned": false,
+  "boss": {
+    "id": 9001,
+    "target": {
+      "name": "Example boss",
+      "npcId": 2400017,
+      "isBoss": true,
+      "hp": 37500000,
+      "maxHp": null,
+      "hpPct": 37.5
+    }
+  }
+}

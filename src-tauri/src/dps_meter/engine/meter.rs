@@ -97,7 +97,7 @@ pub struct DpsMeter {
     snapshot_thread: Mutex<Option<JoinHandle<()>>>,
     memory_snapshot_thread: Mutex<Option<JoinHandle<()>>>,
     last_emitted_total_damage: Arc<Mutex<Option<u64>>>,
-    last_snapshot: Arc<Mutex<Option<CombatSnapshot>>>,
+    last_snapshot: Arc<Mutex<Option<Arc<CombatSnapshot>>>>,
     history: Arc<HistoryStore>,
     personal_bests: Arc<PersonalBestStore>,
     /// Until when the overlay stays up regardless of the idle rule: after
@@ -119,6 +119,12 @@ impl DpsMeter {
             .app_data_dir()
             .unwrap_or_else(|_| std::env::temp_dir().join("aether"))
             .join("recordings");
+        // owner 14.10: automatic recordings are off for users and the old ones (up to 512 MB each) are removed;
+        // recordings started by hand are never touched
+        let removed = prune_recordings(&recordings_dir, AUTO_RECORDING_PREFIX, 0);
+        if removed > 0 {
+            logger.info(format!("removed {removed} old automatic recordings"));
+        }
         let windivert_capturer =
             WinDivertCapturer::new(packet_channel.clone(), Arc::clone(&logger));
         let pcap_capturer = PcapCapturer::new(packet_channel.clone(), Arc::clone(&logger));
@@ -225,6 +231,15 @@ impl DpsMeter {
 
     pub fn summon_owner_ids(&self) -> std::collections::HashSet<u32> {
         self.data_storage.summon_owner_snapshot().into_values().collect()
+    }
+
+    pub fn main_actor_profile(&self) -> Option<(u32, String, Option<String>, Option<u64>, Option<u64>)> {
+        self.data_storage.main_actor_profile()
+    }
+
+    pub fn apply_own_profile(&self, payload: &[u8]) -> bool {
+        let context = crate::dps_meter::capture::parser::context::ParserContext::new(&self.data_storage, &self.logger, "host-own-profile");
+        crate::dps_meter::capture::parser::nickname::parse_main(&context, payload, false)
     }
 
     pub fn party_snapshot(&self) -> crate::dps_meter::storage::data_storage::PartySnapshot {
@@ -392,9 +407,15 @@ impl DpsMeter {
 
     /// Save what the meter holds to history, and learn personal bests from it.
     fn save_fight_to_history(&self) {
-        let Some(snapshot) = self.get_dps_snapshot(0) else {
+        let Some(mut snapshot) = self.get_dps_snapshot(0) else {
             return;
         };
+        if std::env::args().any(|arg| arg == "--service") {
+            // The tracker captures unknown targets early but archives only bosses.
+            // Ordinary packs must not evict boss history before the host filters it.
+            snapshot.by_target_player_stats.retain(|id, _|
+                snapshot.combat_infos.target_infos.get(id).is_some_and(|target| target.is_boss));
+        }
         eprintln!(
             "[dps_meter] save: total_damage={} targets={}",
             snapshot.total_damage,
@@ -445,7 +466,8 @@ impl DpsMeter {
     /// Resets meter silently (no empty snapshot emit) and logs character identity.
 
     pub fn get_last_snapshot(&self) -> Option<CombatSnapshot> {
-        self.last_snapshot.lock().unwrap().clone()
+        let snapshot = self.last_snapshot.lock().unwrap().clone();
+        snapshot.map(|snapshot| (*snapshot).clone())
     }
 
     pub fn get_history(&self) -> Vec<crate::dps_meter::history::HistoryRecord> {
@@ -616,7 +638,9 @@ impl DpsMeter {
                 if let Some(snapshot) = calculator.get_dps_snapshot(0, hide_unknown, max_count) {
                     // Cache non-empty snapshots for detail window fallback
                     if snapshot.total_damage > 0 {
-                        *last_snapshot.lock().unwrap() = Some(snapshot.clone());
+                        let cached = Arc::new(snapshot.ui_copy());
+                        let previous = last_snapshot.lock().unwrap().replace(cached);
+                        drop(previous);
                     }
                     let should_emit = {
                         let mut last_damage = last_emitted_total_damage.lock().unwrap();
@@ -712,7 +736,8 @@ impl DpsMeter {
                     ));
                 }
 
-                let auto_record_enabled = config.read().unwrap().auto_record_unknown_server;
+                // owner 14.10: off for every user (an old saved config may still say true); manual recording stays
+                let auto_record_enabled = false;
                 auto_record_tick(
                     &auto_record,
                     &recorder,

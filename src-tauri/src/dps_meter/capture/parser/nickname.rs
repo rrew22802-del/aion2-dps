@@ -1,5 +1,5 @@
 use super::context::ParserContext;
-use super::utils::{bytes_to_hex, find_bytes, last_index_of, read_u32_le, read_varint};
+use super::utils::{find_bytes, last_index_of, read_u32_le, read_u64_le, read_varint};
 
 const COMBAT_POWER_MARKER: [u8; 3] = [0xF4, 0xCB, 0x1F];
 
@@ -16,11 +16,9 @@ pub(crate) fn parse_main_combat_power(
     payload: &[u8],
     _is_compressed_bundle: bool,
 ) -> bool {
-    if payload.len() < 6 || payload[0] != 0x56 || payload[1] != 0x36 {
+    let Some(combat_power) = own_combat_power_update(payload) else {
         return false;
-    }
-
-    let combat_power = u64::from(read_u32_le(payload, 2).unwrap_or_default());
+    };
     if !context
         .data_storage
         .save_main_actor_combat_power(combat_power)
@@ -37,69 +35,109 @@ pub(crate) fn parse_main_combat_power(
 
 // 33 36 <actor_id> <five metadata bytes> <name_len> <name> <sid>
 fn parse_main_fixed(context: &ParserContext<'_>, payload: &[u8]) -> bool {
-    let actor_id_info = read_varint(payload, 2);
-    if !actor_id_info.is_valid() || actor_id_info.value <= 0 {
-        return false;
-    }
-
-    let structure_start = 2 + actor_id_info.length;
-    if structure_start + 6 > payload.len() {
-        return false;
-    }
-
-    let name_len = usize::from(payload[structure_start + 5]);
-    if !(1..=36).contains(&name_len) {
-        return false;
-    }
-
-    let name_start = structure_start + 6;
-    let name_end = name_start + name_len;
-    if name_end + 2 > payload.len() {
-        return false;
-    }
-
-    let server_id = u32::from(u16::from_le_bytes([
-        payload[name_end],
-        payload[name_end + 1],
-    ]));
-    if !is_available_server_id(server_id) {
-        return false;
-    }
-    crate::dps_meter::region::observe_server_id(server_id);
-
-    let Ok(name) = std::str::from_utf8(&payload[name_start..name_end]) else {
-        return false;
-    };
-    let Some(name) = sanitize_nickname(name) else {
-        return false;
-    };
-
-    let name_hex = bytes_to_hex(&payload[name_start..name_end]);
-    let job = payload.get(name_end + 2).copied();
-    let job_text = job
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "none".to_string());
+    let Some(profile) = decode_main_profile(payload) else { return false; };
+    let actor_id = profile.actor_id;
+    let name = profile.name;
+    let server_id = profile.server;
+    let job = profile.job;
     let actor_class = job.and_then(job_to_actor_class);
-    let actor_id = actor_id_info.value as u32;
-    context
-        .data_storage
-        .append_actor(actor_id, &name, Some(&server_id.to_string()));
-    if let Some(actor_class) = actor_class {
-        context.data_storage.set_actor_class(actor_id, actor_class);
-    }
-    context.logger.info(format!(
-        "[{}] main actor actor={} name={} name_hex={} sid={} job={} class={}",
-        context.port,
-        actor_id_info.value,
-        name,
-        name_hex,
-        server_id,
-        job_text,
-        actor_class.unwrap_or("none")
-    ));
+    crate::dps_meter::region::observe_server_id(server_id);
+    context.data_storage.append_actor(actor_id, &name, Some(&server_id.to_string()));
+    if let Some(class) = actor_class { context.data_storage.set_actor_class(actor_id, class); }
     context.data_storage.set_main_actor(actor_id, &name);
     context.data_storage.upsert_party_member(actor_id, &name, actor_class);
+    context.logger.info(format!("[{}] own profile actor={} name={} sid={} class={}", context.port,
+        actor_id, name, server_id, actor_class.unwrap_or("none")));
+    if let Some(cp) = profile_combat_power(payload) { context.data_storage.save_main_actor_combat_power(cp); }
     true
+}
+
+pub(crate) struct MainProfile {
+    pub actor_id: u32,
+    pub name: String,
+    pub server: u32,
+    pub job: Option<u8>,
+}
+
+pub(crate) fn decode_main_profile(payload: &[u8]) -> Option<MainProfile> {
+    if payload.get(..2)? != [0x33, 0x36] { return None; }
+    let actor = read_varint(payload, 2);
+    if !actor.is_valid() || actor.value <= 0 { return None; }
+    let start = 2 + actor.length;
+    if let Some(profile) = decode_main_profile_at(payload, actor.value as u32, start + 5) { return Some(profile); }
+    // Global profile metadata has varied in width. Search only the short header,
+    // requiring an exact UTF-8 nickname, server and recognized job for fallback layouts.
+    let mut found = None;
+    for metadata_bytes in 0..=12 {
+        if metadata_bytes == 5 { continue; }
+        if let Some(profile) = decode_main_profile_at(payload, actor.value as u32, start + metadata_bytes) {
+            if profile.job.and_then(job_to_actor_class).is_none() { continue; }
+            if found.is_some() { return None; } // ambiguous headers are not identities
+            found = Some(profile);
+        }
+    }
+    found
+}
+
+fn decode_main_profile_at(payload: &[u8], actor_id: u32, at: usize) -> Option<MainProfile> {
+    let len = usize::from(*payload.get(at)?);
+    if !(1..=36).contains(&len) { return None; }
+    let start = at + 1;
+    let end = start + len;
+    let raw = std::str::from_utf8(payload.get(start..end)?).ok()?;
+    let name = sanitize_nickname(raw)?;
+    if name != raw { return None; }
+    let server_bytes = payload.get(end..end + 2)?;
+    let server = u32::from(u16::from_le_bytes([server_bytes[0],server_bytes[1]]));
+    if !is_available_server_id(server) { return None; }
+    Some(MainProfile { actor_id, name, server, job: payload.get(end + 2).copied() })
+}
+
+
+const MAX_COMBAT_POWER: u64 = 10_000_000;
+
+/// `56 36` + two u64 LE (18 bytes): the current combat power and a second value that is never below it
+/// (captures 07.10 and 10.10: 36947/46099 -> 46099/46099, 59292/75697 -> 75567/75697 during a login).
+/// The game also sends a 10-byte `56 36` with an unrelated payload — that one is rejected by the length.
+fn own_combat_power_update(payload: &[u8]) -> Option<u64> {
+    if payload.len() != 18 || payload[0] != 0x56 || payload[1] != 0x36 {
+        return None;
+    }
+    plausible_power_pair(read_u64_le(payload, 2)?, read_u64_le(payload, 10)?)
+}
+
+/// The pair is (current, settled). At login and after a zone change the game sends a ladder whose first value climbs
+/// to the settled one within a fraction of a second (10.10: 59 292 → 64 816 → 75 567, settled 75 697 in every step).
+/// Owner 12.10: after a teleport the later steps were lost in the following data burst and the own power stuck at the
+/// first step (59 359 instead of 75 637) — so while the first value is still far below the settled one, the settled
+/// one is the answer.
+fn plausible_power_pair(power: u64, second: u64) -> Option<u64> {
+    if !((1..=MAX_COMBAT_POWER).contains(&power) && (1..=MAX_COMBAT_POWER).contains(&second) && second >= power) { return None; }
+    Some(if power * 100 >= second * 97 { power } else { second })
+}
+
+/// The own profile `33 36` carries the same pair right before two stat blocks, each `<n> (<k> <u16>){n}` with k = 1..n
+/// (every full profile in the 06.10–10.10 captures: the pair sits 64 bytes before the end). Searched from the end and
+/// accepted only together with both blocks, so stray numbers inside the profile cannot pass.
+fn profile_combat_power(payload: &[u8]) -> Option<u64> {
+    if payload.len() < 2 + 16 + 2 || payload[0] != 0x33 || payload[1] != 0x36 {
+        return None;
+    }
+    (2..=payload.len() - 16).rev().find_map(|at| {
+        let power = plausible_power_pair(read_u64_le(payload, at)?, read_u64_le(payload, at + 8)?)?;
+        let first = stat_block_end(payload, at + 16)?;
+        stat_block_end(payload, first)?;
+        Some(power)
+    })
+}
+
+fn stat_block_end(payload: &[u8], at: usize) -> Option<usize> {
+    let count = usize::from(*payload.get(at)?);
+    let end = at + 1 + count * 3;
+    if !(1..=10).contains(&count) || end > payload.len() {
+        return None;
+    }
+    (0..count).all(|k| usize::from(payload[at + 1 + k * 3]) == k + 1).then_some(end)
 }
 
 pub(crate) fn parse_other(
@@ -460,6 +498,62 @@ fn is_han_character(character: char) -> bool {
 mod tests {
     use super::{decode_other_player, decode_party_action, decode_party_packet, sanitize_nickname, PartyAction, PartyPacket};
 
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn own_profile_supports_variable_metadata_width_without_guessing_another_player() {
+        use super::decode_main_profile;
+        let profile = decode_main_profile(&hex("3336B20C5E81C128370472776E64FE0810000000022D000000FF050000FF0500002D000000")).unwrap();
+        assert_eq!((profile.actor_id, profile.name.as_str(), profile.server, profile.job), (1586, "rwnd", 2302, Some(16)));
+        let shorter = decode_main_profile(&hex("3336B20C5E81C1280472776E64FE0810000000")).unwrap();
+        assert_eq!((shorter.actor_id, shorter.name.as_str(), shorter.server), (1586, "rwnd", 2302));
+        assert!(decode_main_profile(&hex("4536B20C5E81C1280472776E64FE0810")).is_none());
+        assert!(decode_main_profile(&hex("3336B20C5E81C1280472776E64FE")).is_none());
+        assert!(decode_main_profile(&hex("3336B20C5E81C12804FFFFFFFFFE0810")).is_none());
+    }
+
+    #[test]
+    fn own_combat_power_update_reads_the_login_ladder_and_rejects_other_56_36() {
+        use super::own_combat_power_update;
+        // owner login 10.10 (rwnd, Global): three updates within 0.2 s, the last one is the real value; the early steps
+        // already answer with the settled value (12.10: a lost tail must not leave the first step on screen)
+        assert_eq!(own_combat_power_update(&hex("56369ce7000000000000b127010000000000")), Some(75_697));
+        assert_eq!(own_combat_power_update(&hex("563630fd000000000000b127010000000000")), Some(75_697));
+        assert_eq!(own_combat_power_update(&hex("56362f27010000000000b127010000000000")), Some(75_567));
+        // 07.10: equal pair
+        assert_eq!(own_combat_power_update(&hex("563613b400000000000013b4000000000000")), Some(46_099));
+        // the 10-byte 56 36 is another message: its bytes used to be read as power
+        assert_eq!(own_combat_power_update(&hex("5636b7673a7b915ad2f9")), None);
+        // truncated, padded, second value below the first, zero, absurd
+        assert_eq!(own_combat_power_update(&hex("56362f27010000000000b1270100")), None);
+        assert_eq!(own_combat_power_update(&hex("56362f27010000000000b12701000000000000")), None);
+        assert_eq!(own_combat_power_update(&hex("5636b127010000000000b11f010000000000")), None);
+        assert_eq!(own_combat_power_update(&hex("56360000000000000000b127010000000000")), None);
+        assert_eq!(own_combat_power_update(&hex("5636ffffffff00000000ffffffff00000000")), None);
+    }
+
+    #[test]
+    fn profile_combat_power_is_found_before_the_two_stat_blocks() {
+        use super::profile_combat_power;
+        // the real tails of the own 33 36 profile (10.10 and 07.10) behind a filler that also contains a decoy pair
+        let mut packet = hex("3336");
+        packet.extend(hex("2f27010000000000b127010000000000"));
+        packet.extend(vec![0x11; 300]);
+        packet.extend(hex("000000000000000000000000000000002f27010000000000b12701000000000005014c010200000300000400000500000501c60002000003030004000005000002010000000700000002000000010000"));
+        assert_eq!(profile_combat_power(&packet), Some(75_567));
+        let mut packet = hex("3336");
+        packet.extend(hex("0000000000000000000000000000000013b400000000000013b40000000000000501af000200000300000400000500000501340002000003000004000005000002010000000100000002000000010000"));
+        assert_eq!(profile_combat_power(&packet), Some(46_099));
+        // a pair without the stat blocks behind it is not a profile power; neither is a short 33 36
+        let mut packet = hex("3336");
+        packet.extend(hex("2f27010000000000b127010000000000"));
+        packet.extend(vec![0x07; 48]);
+        assert_eq!(profile_combat_power(&packet), None);
+        assert_eq!(profile_combat_power(&hex("3336a1b2c3d4e5f60708")), None);
+    }
+
     #[test]
     fn captured_town_samples_decode_name_and_job_class() {
         let fixture = include_str!("../../../../tests/fixtures/45-36-town.hex");
@@ -499,6 +593,31 @@ mod tests {
     fn sanitize_nickname_keeps_single_cjk_extension_character() {
         assert_eq!(sanitize_nickname("𠮷"), Some("𠮷".to_string()));
         assert_eq!(sanitize_nickname("𫠜"), Some("𫠜".to_string()));
+    }
+
+    #[test]
+    fn sanitize_nickname_keeps_single_hangul_syllable() {
+        for name in ["범", "가", "힣"] {
+            assert_eq!(sanitize_nickname(name), Some(name.to_string()));
+        }
+    }
+
+    #[test]
+    fn own_profile_keeps_single_hangul_name_with_legacy_and_fallback_headers() {
+        // Same nickname/name-length support as Nania GPL; keep the late profile decoder.
+        for metadata_bytes in [5usize, 7] {
+            let mut packet = vec![0x33, 0x36, 0x82, 0x4A]; // actor 9474
+            packet.extend(std::iter::repeat_n(0, metadata_bytes));
+            packet.push(3); // UTF-8 byte length, not character count
+            packet.extend("범".as_bytes());
+            packet.extend(2302u16.to_le_bytes());
+            packet.push(13); // Ranger
+            let profile = super::decode_main_profile(&packet).unwrap();
+            assert_eq!(profile.actor_id, 9474);
+            assert_eq!(profile.name, "범");
+            assert_eq!(profile.server, 2302);
+            assert_eq!(super::job_to_actor_class(profile.job.unwrap()), Some("RANGER"));
+        }
     }
 
     #[test]

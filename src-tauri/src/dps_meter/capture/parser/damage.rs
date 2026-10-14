@@ -97,9 +97,7 @@ impl StreamProcessor {
             if (3_000_000..=3_099_999).contains(&exact_skill_code) {
                 exact_skill_code = exact_skill_code * 10 + 1;
             }
-            if !(1..=299_999_999).contains(&exact_skill_code)
-                || (1_000_000..=9_999_999).contains(&exact_skill_code)
-            {
+            if !valid_damage_skill_code(exact_skill_code, self.data_storage.has_mob(actor_id)) {
                 reader.offset = checkpoint;
                 break;
             }
@@ -409,4 +407,41 @@ fn collect_varints(data: &[u8], start: usize, max_count: usize) -> Vec<i64> {
     }
 
     values
+}
+
+fn valid_damage_skill_code(code: u32, confirmed_mob: bool) -> bool {
+    // Ferk uses 1.6M skill codes for incoming hits; retain the player-code guard.
+    (1..=299_999_999).contains(&code)
+        && (confirmed_mob || !(1_000_000..=9_999_999).contains(&code))
+}
+
+#[cfg(test)]
+mod incoming_boss_regressions {
+    use super::*;
+    #[test]
+    fn ferk_incoming_hit_skill_codes_are_valid_only_for_confirmed_mobs() {
+        // Actual Ferk 53919 -> rwnd 9474 hits from the complete 13 October fight.
+        for (hex, expected_skill, expected_damage) in [
+            ("0438824A06009FA503EC87180002020000023B18950901000000904E940C0100", 1607660, 1556),
+            ("0438824A06009FA503CE8718000802000002830C950901000000904ED5060100", 1607630, 853),
+        ] {
+            let packet: Vec<u8> = (0..hex.len()).step_by(2).map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap()).collect();
+            let mut reader = DamagePacketReader::new(&packet, 2);
+            assert_eq!(reader.try_read_var_int(), Some(9474));
+            assert_eq!(reader.try_read_var_int(), Some(6));
+            assert_eq!(reader.try_read_var_int(), Some(0));
+            assert_eq!(reader.try_read_var_int(), Some(53919));
+            let code = parse_u32_le(&packet, reader.offset);
+            assert_eq!(code, expected_skill);
+            reader.offset += 5;
+            assert_eq!(reader.try_read_var_int(), Some(2));
+            reader.offset += 10;
+            assert_eq!(collect_varints(&packet, reader.offset, 5), vec![0, 10000, expected_damage, 1, 0]);
+            assert!(valid_damage_skill_code(code, true));
+            assert!(!valid_damage_skill_code(code, false));
+        }
+        assert!(valid_damage_skill_code(14090240, false));
+        assert!(!valid_damage_skill_code(0, true));
+        assert!(!valid_damage_skill_code(300000000, true));
+    }
 }

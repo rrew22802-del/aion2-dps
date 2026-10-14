@@ -33,7 +33,6 @@ const CANDIDATE_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 /// only ever opens it read-only. So the driver is unloaded as soon as Aether is
 /// done with it, but only when Aether is the one that loaded it: a VPN or
 /// another tool relying on WinDivert keeps its driver.
-static LOADED_BY_US: AtomicBool = AtomicBool::new(false);
 /// Handles Aether holds; the driver is only unloaded once none is left, so a
 /// status probe never pulls it out from under a running capture.
 static OPEN_HANDLES: AtomicUsize = AtomicUsize::new(0);
@@ -214,8 +213,7 @@ pub fn check_windivert_status() -> WinDivertStatus {
         }
     };
 
-    // A probe only asks; closing its handle unloads the driver again unless
-    // a capture is using it.
+    // A probe releases its own handle. Shared driver lifetime is not ours to control.
     close_handle(handle);
     WinDivertStatus {
         available: true,
@@ -229,15 +227,11 @@ pub fn check_windivert_status() -> WinDivertStatus {
 fn open_handle() -> std::io::Result<HANDLE> {
     let filter = CString::new(FILTER).expect("static WinDivert filter");
     let flags = WinDivertFlags::new().set_sniff().set_recv_only();
-    let was_loaded = service::is_running();
     let handle = unsafe { WinDivertOpen(filter.as_ptr(), WinDivertLayer::Network, 0, flags) };
 
     if handle.is_invalid() {
         Err(std::io::Error::last_os_error())
     } else {
-        if !was_loaded {
-            LOADED_BY_US.store(true, Ordering::SeqCst);
-        }
         OPEN_HANDLES.fetch_add(1, Ordering::SeqCst);
         Ok(handle)
     }
@@ -247,60 +241,9 @@ fn close_handle(handle: HANDLE) {
     unsafe {
         let _ = WinDivertClose(handle);
     }
-    if OPEN_HANDLES.fetch_sub(1, Ordering::SeqCst) == 1 {
-        unload_driver();
-    }
+    OPEN_HANDLES.fetch_sub(1, Ordering::SeqCst);
 }
 
-/// Unload the WinDivert driver if Aether loaded it and holds no handle to it.
-/// Runs when Aether's last handle closes, and on exit.
-pub fn unload_driver() {
-    if OPEN_HANDLES.load(Ordering::SeqCst) == 0 && LOADED_BY_US.swap(false, Ordering::SeqCst) {
-        service::stop();
-    }
-}
-
-/// The driver's service, which WinDivert installs as `WinDivert` on first open
-/// and marks for deletion, so stopping it also removes it.
-mod service {
-    use windows::{
-        core::w,
-        Win32::System::Services::{
-            CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW, QueryServiceStatus,
-            SC_HANDLE, SC_MANAGER_CONNECT, SERVICE_CONTROL_STOP, SERVICE_QUERY_STATUS,
-            SERVICE_RUNNING, SERVICE_STATUS, SERVICE_STOP,
-        },
-    };
-
-    fn with_service<T>(access: u32, act: impl FnOnce(SC_HANDLE) -> T) -> Option<T> {
-        unsafe {
-            let manager = OpenSCManagerW(None, None, SC_MANAGER_CONNECT).ok()?;
-            let result = OpenServiceW(manager, w!("WinDivert"), access).ok().map(|service| {
-                let result = act(service);
-                let _ = CloseServiceHandle(service);
-                result
-            });
-            let _ = CloseServiceHandle(manager);
-            result
-        }
-    }
-
-    pub fn is_running() -> bool {
-        with_service(SERVICE_QUERY_STATUS, |service| {
-            let mut status = SERVICE_STATUS::default();
-            unsafe { QueryServiceStatus(service, &mut status) }.is_ok()
-                && status.dwCurrentState == SERVICE_RUNNING
-        })
-        .unwrap_or(false)
-    }
-
-    pub fn stop() {
-        with_service(SERVICE_STOP, |service| {
-            let mut status = SERVICE_STATUS::default();
-            unsafe { ControlService(service, SERVICE_CONTROL_STOP, &mut status) }.is_ok()
-        });
-    }
-}
 
 fn windivert_error_message(error_code: Option<i32>, error: &std::io::Error) -> String {
     let reason = match error_code {

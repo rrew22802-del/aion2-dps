@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DBAion2 DPS",
+  "productName": "TeamMate DPS",
   "mainBinaryName": "DBAion2 DPS",
-  "version": "2.8.0",
+  "version": "2.9.4",
   "identifier": "ru.dbaion2.dps",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "DBAion2 DPS",
+        "title": "TeamMate DPS",
         "width": 1920,
         "height": 1080,
         "decorations": false,
@@ -41,7 +41,10 @@
       "nsis": {
         "installerHooks": "installer-hooks.nsh",
         "installerIcon": "icons/icon.ico",
-        "languages": ["English", "Russian"],
+        "languages": [
+          "English",
+          "Russian"
+        ],
         "installMode": "perMachine"
       }
     },

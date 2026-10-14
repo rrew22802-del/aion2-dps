@@ -9,7 +9,10 @@ pub const DEFAULT_MEMORY_SNAPSHOT_INTERVAL_MS: u64 = 2000;
 pub const DEFAULT_MAX_PACKET_SIZE_THRESHOLD: u64 = 8 * 1024;
 pub const DEFAULT_STALL_RESYNC_DELAY_MS: u64 = 1000;
 pub const DEFAULT_FULL_PROCESSOR_STALL_RESYNC_DELAY_MS: u64 = 200;
-pub const DEFAULT_UNKNOWN_PACKET_STALL_RESYNC_DELAY_MS: u64 = 10;
+// owner 12.10 (second PC, booster on 127.0.0.1:8888): 272 stalls in one evening, every one on a large packet with an opcode we do
+// not parse that was nearly complete (7 826 of 7 933 bytes). After 10 ms the stream skipped a byte, lost its framing and dropped
+// the following damage for half a minute (a whole boss uncounted). Its tail just needs the same wait as a known packet.
+pub const DEFAULT_UNKNOWN_PACKET_STALL_RESYNC_DELAY_MS: u64 = 200;
 pub const TRAINING_DUMMY_MOB_CODE: [u32; 2] = [2_400_032, 2_400_035];
 pub const DEFAULT_HIDE_KNOWN_PLAYERS: bool = false;
 pub const DEFAULT_MAX_PLAYER_COUNT: usize = 10;
@@ -136,8 +139,9 @@ impl DpsMeterConfig {
         self.stall_resync_delay_ms = self.stall_resync_delay_ms.clamp(50, 2000);
         self.full_processor_stall_resync_delay_ms =
             self.full_processor_stall_resync_delay_ms.min(2000);
+        // a saved 10 ms from older builds is raised too (there is no setting for it in the UI)
         self.unknown_packet_stall_resync_delay_ms =
-            self.unknown_packet_stall_resync_delay_ms.min(500);
+            self.unknown_packet_stall_resync_delay_ms.clamp(150, 500);
         // A region stored by an older build must not linger where nothing
         // shows it any more.
         self.region = RegionId::Auto;
@@ -234,5 +238,12 @@ mod tests {
         assert!(config.hide_when_idle);
         assert_eq!(config.idle_reset_secs, DEFAULT_IDLE_RESET_SECS);
         assert!(config.auto_record_unknown_server);
+    }
+    #[test]
+    fn a_saved_10_ms_unknown_packet_wait_is_raised() {
+        // owner 12.10: 10 ms dropped nearly complete packets and the framing with them
+        let config = DpsMeterConfig { unknown_packet_stall_resync_delay_ms: 10, ..DpsMeterConfig::default() }.normalized();
+        assert_eq!(config.unknown_packet_stall_resync_delay_ms, 150);
+        assert_eq!(DpsMeterConfig::default().normalized().unknown_packet_stall_resync_delay_ms, 200);
     }
 }
