@@ -56,4 +56,8 @@ pub struct ParsedDamagePacket {
     pub multi_hit_damage: u64,
     pub multi_hit_count: u32,
     pub specials: Vec<String>,
+    /// From the strict decoder: 0 damage, 1 healing (by effect id). `None` = old offset reader,
+    /// which still classifies healing by the skill whitelist.
+    #[serde(default)]
+    pub resource: Option<u8>,
 }

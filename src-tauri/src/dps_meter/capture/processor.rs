@@ -113,6 +113,8 @@ pub struct StreamProcessor {
     stalled_since: Option<Instant>,
     stalled_candidate: Option<StallCandidate>,
     combat_damage_enabled: bool,
+    /// Periodic pool notices per stream (strict `05 38` rules).
+    pub(super) periodic_pools: crate::dps_meter::capture::parser::reference::PeriodicPools,
 }
 
 impl StreamProcessor {
@@ -132,6 +134,7 @@ impl StreamProcessor {
             stalled_since: None,
             stalled_candidate: None,
             combat_damage_enabled: false,
+            periodic_pools: Default::default(),
         }
     }
 
@@ -151,6 +154,7 @@ impl StreamProcessor {
             stalled_since: None,
             stalled_candidate: None,
             combat_damage_enabled: false,
+            periodic_pools: Default::default(),
         }
     }
 

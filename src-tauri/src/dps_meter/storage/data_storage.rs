@@ -163,6 +163,8 @@ struct DataStorageInner {
     actor_id_skill_spec_map: BoundedMap<u32, HashMap<u32, Vec<u32>>>,
     mob_id_code_map: BoundedMap<u32, u32>,
     mob_id_hp_map: BoundedMap<u32, (u32, u32)>,
+    /// HP a mob still has for damage counting: the last 00 8D / vitals value minus the damage counted since.
+    hp_left: BoundedMap<u32, HpCap>,
     target_death_at: BoundedMap<u32, f64>,
     mob_id_max_hp_map: BoundedMap<u32,u32>,
     player_hp_map: BoundedMap<u32, PlayerHpInfo>,
@@ -235,6 +237,7 @@ impl Default for DataStorageInner {
             actor_id_skill_spec_map: BoundedMap::new(ACTOR_METADATA_CAPACITY),
             mob_id_code_map: BoundedMap::new(MOB_METADATA_CAPACITY),
             mob_id_hp_map: BoundedMap::new(MOB_METADATA_CAPACITY),
+            hp_left: BoundedMap::new(MOB_METADATA_CAPACITY),
             mob_id_max_hp_map: BoundedMap::new(MOB_METADATA_CAPACITY),
             player_hp_map: BoundedMap::new(ACTOR_METADATA_CAPACITY),
             use_buffs_by_target: BoundedMap::new(BUFF_TARGET_CAPACITY),
@@ -346,6 +349,7 @@ impl DataStorage {
         let mob_id_max_hp_map = inner.mob_id_max_hp_map.clone();
         let mob_id_code_map = inner.mob_id_code_map.clone();
         let mob_id_hp_map = inner.mob_id_hp_map.clone();
+        let hp_left = inner.hp_left.clone();
         let player_hp_map = inner.player_hp_map.clone();
         let pvp_attackers_by_target = inner.pvp_attackers_by_target.clone();
         let pvp_last_attacker_by_target = inner.pvp_last_attacker_by_target.clone();
@@ -380,6 +384,7 @@ impl DataStorage {
         inner.mob_id_code_map = mob_id_code_map;
         inner.mob_id_max_hp_map = mob_id_max_hp_map;
         inner.mob_id_hp_map = mob_id_hp_map;
+        inner.hp_left = hp_left;
         inner.player_hp_map = player_hp_map;
         inner.pvp_attackers_by_target = pvp_attackers_by_target;
         inner.pvp_last_attacker_by_target = pvp_last_attacker_by_target;
@@ -456,12 +461,16 @@ impl DataStorage {
         }
     }
 
-    pub fn append_damage_at(&self, packet: ParsedDamagePacket, timestamp: f64) {
+    pub fn append_damage_at(&self, mut packet: ParsedDamagePacket, timestamp: f64) {
         let config = self.config.read().unwrap().clone();
         let mut inner = self.inner.write().unwrap();
 
         let at_ms = (timestamp.max(0.0) * 1000.0) as u64;
-        let is_heal = self.healing_skill_codes.contains(&packet.skill_code);
+        // strict events carry their kind (by effect id); old-reader events keep the skill whitelist
+        let is_heal = match packet.resource {
+            Some(kind) => kind == 1,
+            None => self.healing_skill_codes.contains(&packet.skill_code),
+        };
         if is_heal {
             if packet.actor_id != 0 && packet.damage > 0 {
                 let actor = inner.summon_owner_map.get(&packet.actor_id).copied().unwrap_or(packet.actor_id);
@@ -485,6 +494,11 @@ impl DataStorage {
         if packet.actor_id == 0 {
             return;
         }
+
+        // Game analyzer (boss fight 19.10, HP updates vs hits): damage on a mob counts only up to the HP it still
+        // has — the killing blow loses its overkill, hits on an already dead mob count nothing.
+        let Some(damage) = inner.hp_left.map.get_mut(&packet.target_id).map_or(Some(packet.damage), |cap| cap.count(packet.damage)) else { return; };
+        packet.damage = damage;
 
         // let actor_id = packet.actor_id;
         // A summon's damage is attributed to whoever summoned it.
@@ -619,6 +633,10 @@ impl DataStorage {
             special_counts.insert("MULTIHIT".to_string(), 0);
         }
         special_counts.insert("MULTIHITDMG".to_string(), packet.multi_hit_damage as u32);
+        // 19.10: periodic ticks are counted apart — HIT and the rates are direct hits only (game analyzer / NotMeter)
+        if packet.is_dot {
+            special_counts.insert("DOT".to_string(), 1);
+        }
 
         let total_damage = packet.damage;
 
@@ -642,6 +660,13 @@ impl DataStorage {
             && (10001..=10005).contains(&(stats_skill_code / 10))
         {
             stats_skill_code = (stats_skill_code / 10) * 10;
+        }
+        // 19.10: the game's own report grouping wins where the client table has one
+        // (Skill.DamageAnalyzerSkillIdOverride); theostone codes keep their named 30xxxxxx form.
+        if !(30_000_000..=30_999_999).contains(&packet.ori_skill_code) {
+            if let Some(group) = crate::dps_meter::capture::parser::reference::analyzer().group(packet.ori_skill_code) {
+                stats_skill_code = group;
+            }
         }
 
         let skill_stats = inner
@@ -832,7 +857,7 @@ impl DataStorage {
     pub fn append_mob_vitals(&self,id:u32,hp:u32,max:u32) {
         if max==0 || hp>max {return;}
         let mut inner=self.inner.write().unwrap();
-        inner.mob_id_max_hp_map.insert(id,max); inner.mob_id_hp_map.insert(id,(hp,max));
+        inner.mob_id_max_hp_map.insert(id,max); inner.mob_id_hp_map.insert(id,(hp,max)); inner.hp_left.get_mut_or_insert_with(id, HpCap::default).report(hp);
         if hp == 0 { inner.target_death_at.get_mut_or_insert_with(id, current_timestamp_seconds); }
         else { inner.target_death_at.map.remove(&id); inner.target_death_at.order.retain(|v| *v != id); }
     }
@@ -847,6 +872,7 @@ impl DataStorage {
         if current_hp > entry.1 {
             entry.1 = current_hp;
         }
+        inner.hp_left.get_mut_or_insert_with(target_id, HpCap::default).report(current_hp);
         if current_hp == 0 { inner.target_death_at.get_mut_or_insert_with(target_id, current_timestamp_seconds); }
         else { inner.target_death_at.map.remove(&target_id); inner.target_death_at.order.retain(|v| *v != target_id); }
     }
@@ -878,6 +904,11 @@ impl DataStorage {
     pub fn append_summon(&self, owner_id: u32, summon_id: u32) {
         let mut inner = self.inner.write().unwrap();
         record_summon_owner(&mut inner, owner_id, summon_id);
+    }
+
+    /// The owner of a summon, when we saw it being summoned.
+    pub fn summon_owner_of(&self, summon_id: u32) -> Option<u32> {
+        self.inner.read().unwrap().summon_owner_map.get(&summon_id).copied()
     }
 
     pub fn has_summon_owner(&self, summon_id: u32) -> bool {
@@ -1481,6 +1512,64 @@ fn build_pvp_watch_info_for_actor(
         actor_class: inner.actor_id_class_map.get(&actor_id).cloned(),
         current_hp: hp.map(|value| value.current_hp),
         max_hp: hp.map(|value| value.max_observed_hp),
+    }
+}
+
+/// HP a mob still has for damage counting (game analyzer: no overkill, nothing after the death).
+#[derive(Clone, Copy, Debug, Default)]
+struct HpCap { left: u32, reported: u32, raw: u64, lost: u64, off: bool }
+
+impl HpCap {
+    /// A fresh HP value from 00 8D / vitals.
+    fn report(&mut self, hp: u32) {
+        self.lost += u64::from(self.reported.saturating_sub(hp));
+        // damage numbers running well past the HP the mob really lost (phases, damage scaling): stop capping it
+        if hp > 0 && self.raw > self.lost + self.lost / 50 + 5_000 { self.off = true; }
+        self.reported = hp;
+        self.left = hp;
+    }
+    /// None = the mob is already dead, drop the hit.
+    fn count(&mut self, damage: u64) -> Option<u64> {
+        if self.off { return Some(damage); }
+        if self.left == 0 { return None; }
+        self.raw += damage;
+        let counted = damage.min(u64::from(self.left));
+        self.left -= counted as u32;
+        Some(counted)
+    }
+}
+
+#[cfg(test)]
+mod hp_cap_tests {
+    use super::HpCap;
+    #[test]
+    fn killing_blow_loses_overkill_and_later_hits_count_nothing() {
+        // boss fight 19.10: 328 HP left, then 4 747 + 2 502 in one HP interval, 2 382 after the death
+        let mut cap = HpCap::default();
+        cap.report(1_440_000);
+        assert_eq!(cap.count(1_439_672), Some(1_439_672));
+        cap.report(328);
+        assert_eq!(cap.count(4_747), Some(328));
+        assert_eq!(cap.count(2_502), None);
+        cap.report(0);
+        assert_eq!(cap.count(2_382), None);
+        cap.report(500_000); // a new phase refills the HP: counting resumes
+        assert_eq!(cap.count(2_500), Some(2_500));
+    }
+    #[test]
+    fn boss_self_heal_keeps_the_cap_but_scaled_damage_turns_it_off() {
+        let mut heal = HpCap::default();
+        heal.report(18_895_880);
+        assert_eq!(heal.count(38_635), Some(38_635));
+        heal.report(18_859_845); // pets fight 07.10: the boss healed itself 2 600 in this interval
+        assert!(!heal.off);
+        let mut scaled = HpCap::default();
+        scaled.report(1_140_000);
+        assert_eq!(scaled.count(50_000), Some(50_000));
+        scaled.report(1_130_000); // 50 000 counted, 10 000 lost: these numbers are not HP
+        assert!(scaled.off);
+        scaled.report(1);
+        assert_eq!(scaled.count(70_000), Some(70_000));
     }
 }
 

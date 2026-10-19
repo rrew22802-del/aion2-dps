@@ -1,6 +1,8 @@
 use crate::dps_meter::capture::parser::utils::{
     bytes_to_hex, read_u32_le_or_default as parse_u32_le, read_varint,
 };
+use crate::dps_meter::capture::parser::reference::{route_direct, Route};
+use crate::dps_meter::capture::parser::wire::{decode_direct, decode_periodic, special, DirectHit};
 use crate::dps_meter::capture::processor::StreamProcessor;
 use crate::dps_meter::models::packet::{ParsedDamagePacket, SpecialDamage};
 
@@ -37,6 +39,11 @@ impl StreamProcessor {
         _is_compressed_bundle: bool,
     ) -> bool {
         // self.log_packet_source(packet, is_compressed_bundle);
+        // 19.10: the strict field-mask reading first; the offset reader below stays for anything it refuses
+        if let Some(hit) = decode_direct(packet) {
+            self.handle_direct_hit(hit);
+            return true;
+        }
         let mut reader = DamagePacketReader::new(packet, 0);
         if reader.offset + 1 >= packet.len() {
             return false;
@@ -210,6 +217,7 @@ impl StreamProcessor {
                 multi_hit_damage: multi_hit.damage,
                 multi_hit_count: multi_hit.count,
                 specials: special_names.clone(),
+                resource: None,
             };
 
             self.data_storage.append_damage(parsed);
@@ -242,6 +250,41 @@ impl StreamProcessor {
 
     pub(crate) fn parse_dot_packet(&mut self, packet: &[u8], _is_compressed_bundle: bool) -> bool {
         // self.log_packet_source(packet, is_compressed_bundle);
+        // 19.10: strict reading with the pool rules. The old reader took the FIRST amount, which in
+        // mode 11 is the remaining pool, not the tick (2-3x periodic damage on real captures).
+        if let Some(tick) = decode_periodic(packet) {
+            let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or_default();
+            let (actor_id, amount, resource) = match self.periodic_pools.route(&tick, at) {
+                Route::Damage { actor_id, amount } => (actor_id, amount, 0u8),
+                Route::Healing { actor_id, amount } => (actor_id, amount, 1u8),
+                Route::Ignore => return true,
+            };
+            // as before: a tick is filed under its effect id, so DoT rows stay apart from the direct hits of the skill
+            let raw = tick.effect_id;
+            self.logger.debug(format!("[{}] dot strict target={} actor={} mode={} effect={} skill={} amount={} remaining={} heal={}",
+                self.port, tick.target_id, actor_id, tick.mode, tick.effect_id, tick.skill_code, amount, tick.remaining, resource == 1));
+            self.data_storage.append_damage(ParsedDamagePacket {
+                target_id: tick.target_id,
+                actor_id,
+                skill_code: normalize_skill_id(raw),
+                ori_skill_code: raw,
+                damage: amount,
+                is_dot: true,
+                is_crit: false,
+                multi_hit_damage: 0,
+                multi_hit_count: 0,
+                specials: Vec::new(),
+                resource: Some(resource),
+            });
+            return true;
+        }
+        // the old reading is only right when the first amount is the tick itself (no remaining field)
+        if packet.len() > 2 {
+            let target_info = read_varint(packet, 2);
+            if target_info.is_valid() && packet.get(2 + target_info.length).is_some_and(|mode| mode & 0x01 != 0) {
+                return true;
+            }
+        }
         let mut offset = 0usize;
         if packet.len() <= offset + 1 || packet[offset] != 0x05 || packet[offset + 1] != 0x38 {
             return false;
@@ -303,6 +346,7 @@ impl StreamProcessor {
             multi_hit_damage: 0,
             multi_hit_count: 0,
             specials: Vec::new(),
+            resource: None,
         };
         let log_target_id = parsed.target_id;
         let log_actor_id = parsed.actor_id;
@@ -319,6 +363,60 @@ impl StreamProcessor {
             log_damage
         ));
         true
+    }
+}
+
+impl StreamProcessor {
+    fn handle_direct_hit(&mut self, hit: DirectHit) {
+        let mut code = hit.raw_skill_code;
+        if (3_000_000..=3_099_999).contains(&code) {
+            code = code * 10 + 1;
+        }
+        // same guard as the offset reader: 1.xM-9.xM codes are mob skills, kept only for mobs we know
+        if !valid_damage_skill_code(code, self.data_storage.has_mob(hit.actor_id)) {
+            return;
+        }
+        let storage = &self.data_storage;
+        let route = route_direct(&hit, |a, b| storage.summon_owner_of(b) == Some(a) || storage.summon_owner_of(a) == Some(b));
+        let (actor_id, amount, resource) = match route {
+            Route::Damage { actor_id, amount } => (actor_id, amount, 0u8),
+            Route::Healing { actor_id, amount } => (actor_id, amount, 1u8),
+            Route::Ignore => return,
+        };
+        let mut specials = Vec::new();
+        for (bit, name) in [(special::PARRY, SpecialDamage::Parry), (special::PERFECT, SpecialDamage::Perfect),
+                            (special::DOUBLE, SpecialDamage::Double), (special::SMITE, SpecialDamage::Smite)] {
+            if hit.special & bit != 0 {
+                specials.push(name);
+            }
+        }
+        match hit.position {
+            1 => specials.push(SpecialDamage::Back),
+            2 => specials.push(SpecialDamage::Front),
+            _ => {}
+        }
+        let is_crit = hit.type_value == 3;
+        if is_crit {
+            specials.push(SpecialDamage::Critical);
+        }
+        let parsed = ParsedDamagePacket {
+            target_id: hit.target_id,
+            actor_id,
+            skill_code: normalize_skill_id(code),
+            ori_skill_code: code,
+            damage: amount,
+            is_dot: false,
+            is_crit,
+            multi_hit_damage: hit.sub_hits.iter().sum(),
+            multi_hit_count: hit.sub_hits.len() as u32,
+            specials: specials.iter().map(|s| s.as_str().to_string()).collect(),
+            resource: Some(resource),
+        };
+        self.logger.debug(format!(
+            "[{}] damage strict target={} actor={} skill={} effect={} damage={} type={} mask={:#x} special={:#x} pos={} subs={:?} heal={}",
+            self.port, hit.target_id, actor_id, code, hit.effect_id, amount, hit.type_value, hit.mask, hit.special, hit.position, hit.sub_hits, resource == 1
+        ));
+        self.data_storage.append_damage(parsed);
     }
 }
 

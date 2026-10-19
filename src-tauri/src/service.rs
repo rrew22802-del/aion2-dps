@@ -667,8 +667,9 @@ fn player_json(p: &PlayerOverviewStat, self_id: Option<u32>, owners: Option<&Has
         "isSelf": self_id.map(|id| id == p.actor_id),
         "inParty": self_id == Some(p.actor_id) || party_ids.contains(&p.actor_id),
         "isSummonOwner": owners.map(|ids| ids.contains(&p.actor_id)), "damage": p.total_damage,
-        "dps": p.dps, "share": p.damage_share, "hits": p.counts,
-        "critRate": (p.counts > 0).then(|| *p.special_counts.get("CRITICAL").unwrap_or(&0) as f64 / p.counts as f64),
+        "dps": p.dps, "share": p.damage_share, "hits": direct_hits(p.counts, &p.special_counts),
+        "dotTicks": p.special_counts.get("DOT").copied().unwrap_or(0),
+        "critRate": rate(&p.special_counts, p.counts, "CRITICAL"),
         "maxHit": p.max_damage, "cp": p.combat_power, "deaths": p.deaths,
         "healTotal": p.heal_total, "hps": p.hps})
 }
@@ -1048,8 +1049,10 @@ fn skill_icon(id: u32) -> String {
     format!("aion2/skill/{name}.png")
 }
 
+/// Share of direct hits with `key`; periodic ticks never enter the denominator (none = no direct hit).
 fn rate(specials: &HashMap<String, u32>, hits: u32, key: &str) -> Option<f64> {
-    (hits > 0).then(|| *specials.get(key).unwrap_or(&0) as f64 / hits as f64)
+    let direct = direct_hits(hits, specials);
+    (direct > 0).then(|| *specials.get(key).unwrap_or(&0) as f64 / direct as f64)
 }
 
 enum SelectedFight {
@@ -1081,6 +1084,11 @@ fn selected_fight(meter: &DpsMeter, fight: &str) -> Option<SelectedFight> {
     meter.get_history().into_iter().find(|record| record.id == fight).map(SelectedFight::History)
 }
 
+/// Direct hits: every counted event minus the periodic ticks (19.10, game analyzer HIT).
+fn direct_hits(counts: u32, specials: &HashMap<String, u32>) -> u32 {
+    counts.saturating_sub(specials.get("DOT").copied().unwrap_or(0))
+}
+
 fn skill_rows(skills: Option<&HashMap<u32, SkillStats>>, specs: Option<&HashMap<u32, Vec<u32>>>, lang: &str) -> Vec<Value> {
     let Some(skills) = skills else { return Vec::new(); };
     let total: u64 = skills.values().map(|s| s.total_damage).sum();
@@ -1088,7 +1096,7 @@ fn skill_rows(skills: Option<&HashMap<u32, SkillStats>>, specs: Option<&HashMap<
     rows.sort_by(|a, b| b.1.total_damage.cmp(&a.1.total_damage));
     rows.into_iter().map(|(id, s)| json!({"skillId": id, "name": skill_name(*id, lang),
         "icon": skill_icon(*id), "spec": specs.and_then(|map| map.get(id)).cloned().unwrap_or_default(),
-        "damage": s.total_damage, "hits": s.counts,
+        "damage": s.total_damage, "hits": direct_hits(s.counts, &s.special_counts), "dotTicks": s.special_counts.get("DOT").copied().unwrap_or(0),
         "critRate": rate(&s.special_counts, s.counts, "CRITICAL"),
         "perfectRate": rate(&s.special_counts, s.counts, "PERFECT"),
         "doubleRate": rate(&s.special_counts, s.counts, "DOUBLE"),
