@@ -1,7 +1,7 @@
 {
   "name": "dbaion2-dps",
   "private": true,
-  "version": "2.9.7",
+  "version": "2.9.8",
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {

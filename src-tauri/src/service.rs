@@ -337,7 +337,12 @@ fn route(app: &AppHandle, lang: &str, health: &RwLock<CaptureHealth>, method: &M
             let owners = meter.summon_owner_ids();
             let pinned = query_value(query, "target").and_then(|v| v.parse::<u32>().ok());
             let party = meter.party_snapshot();
-            (200, current_state(meter.get_dps_snapshot(0).as_ref(), &owners, &party.member_ids, pinned, lang), false)
+            // ?target=all: the whole group's damage on every target of the session (TeamMate 24.10: adds count too)
+            if query_value(query, "target") == Some("all") {
+                (200, group_state(meter.get_dps_snapshot(0).as_ref(), &owners, &party.member_ids, lang), false)
+            } else {
+                (200, current_state(meter.get_dps_snapshot(0).as_ref(), &owners, &party.member_ids, pinned, lang), false)
+            }
         }
         (Method::Get, "/v1/party") => {
             let party = meter.party_snapshot();
@@ -768,6 +773,51 @@ fn targets_json(snapshot: Option<&CombatSnapshot>, lang: &str) -> Value {
     }).collect();
     rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)));
     json!(rows.into_iter().take(20).map(|r| r.2).collect::<Vec<_>>())
+}
+
+/// Sums every target's per-player stats of the session into one fight: damage on adds and trash counts as well as on the boss.
+fn group_state(snapshot: Option<&CombatSnapshot>, owners: &HashSet<u32>, party_ids: &HashSet<u32>, lang: &str) -> Value {
+    let empty = || json!({"fightId": null, "active": false, "startedAt": null,
+        "durationSec": 0.0, "target": null, "totalDamage": 0, "players": [], "targetId": 0, "allTargets": true});
+    let Some(snapshot) = snapshot else { return empty() };
+    if snapshot.by_target_player_stats.is_empty() { return empty(); }
+    let mut merged: HashMap<u32, PlayerOverviewStat> = HashMap::new();
+    for stats in snapshot.by_target_player_stats.values() {
+        for p in stats.values() {
+            let m = merged.entry(p.actor_id).or_insert_with(|| PlayerOverviewStat {
+                counts: 0, total_damage: 0, min_damage: u64::MAX, max_damage: 0, special_counts: HashMap::new(),
+                dps: 0.0, damage_share: 0.0, damage_contribution: 0.0, heal_total: 0, hps: 0.0, deaths: 0, ..p.clone() });
+            m.counts += p.counts;
+            m.total_damage += p.total_damage;
+            if p.counts > 0 { m.min_damage = m.min_damage.min(p.min_damage); }
+            m.max_damage = m.max_damage.max(p.max_damage);
+            for (k, v) in &p.special_counts { *m.special_counts.entry(k.clone()).or_default() += v; }
+            m.heal_total += p.heal_total;
+            m.deaths = m.deaths.max(p.deaths); // deaths are the actor's, repeated on every target
+            if m.combat_power.is_none() { m.combat_power = p.combat_power; }
+            if m.actor_name.trim().is_empty() { m.actor_name = p.actor_name.clone(); }
+        }
+    }
+    for m in merged.values_mut() { if m.min_damage == u64::MAX { m.min_damage = 0; } }
+    // one clock for all: from the first hit on any target to the last one
+    let mut start = HashMap::new();
+    let mut last = HashMap::new();
+    for t in snapshot.by_target_player_stats.keys().filter_map(|id| snapshot.combat_infos.target_infos.get(id)) {
+        for (actor, at) in &t.target_start_time { let e = start.entry(*actor).or_insert(*at); if *at < *e { *e = *at; } }
+        for (actor, at) in &t.target_last_time { let e = last.entry(*actor).or_insert(*at); if *at > *e { *e = *at; } }
+    }
+    let span = TargetInfo { id: 0, target_mob_code: None, target_name: None, is_boss: false, current_hp: None, max_hp: None,
+        packet_hp: None, target_start_time: start, target_last_time: last, elapsed_at: None, stopped_at: None };
+    let fallback = (snapshot.combat_infos.time_now * 1000.0) as u64;
+    let (started, _) = timing(Some(&span), fallback);
+    let mut state = fight_state(format!("all-{started}"), true, Some(&span), &merged, snapshot.combat_infos.main_actor_id,
+        Some(owners), party_ids, fallback, lang, &HashMap::new());
+    state["targetId"] = json!(0); // 0 = every target (TeamMate reads targetId as a number)
+    state["allTargets"] = json!(true);
+    state["target"]["name"] = json!(if lang == "ru" { "Общий урон группы" } else { "Whole group damage" });
+    state["pinned"] = json!(true);
+    state["boss"] = Value::Null;
+    state
 }
 
 fn current_state(snapshot: Option<&CombatSnapshot>, owners: &HashSet<u32>, party_ids: &HashSet<u32>, pinned: Option<u32>, lang: &str) -> Value {
@@ -1203,6 +1253,32 @@ mod tests {
         assert_eq!(archived["fightId"], expected["fightId"]);
         assert_eq!(target_json(None, "en"), Value::Null);
         assert_eq!(current_state(None, &HashSet::new(), &HashSet::new(), None, "en")["target"], Value::Null);
+    }
+
+    #[test]
+    fn group_state_sums_every_target() {
+        let record = hp_record();
+        let (boss_id, add_id) = (9001u32, 9002u32);
+        let mut infos = record.combat_infos.clone();
+        let mut add = record.target_info.clone().unwrap();
+        add.id = add_id;
+        add.target_last_time = add.target_last_time.iter().map(|(k, v)| (*k, v + 10.0)).collect();
+        infos.target_infos.insert(add_id, add);
+        let snapshot: CombatSnapshot = serde_json::from_value(json!({
+            "totalDamage": record.total_damage * 2,
+            "byTargetPlayerSkillStats": {},
+            "byTargetPlayerStats": {boss_id.to_string(): record.player_stats, add_id.to_string(): record.player_stats},
+            "combatInfos": infos,
+            "lastTargetInfo": record.target_info
+        })).unwrap();
+        let boss = current_state(Some(&snapshot), &HashSet::new(), &HashSet::new(), Some(boss_id), "en");
+        let all = group_state(Some(&snapshot), &HashSet::new(), &HashSet::new(), "en");
+        assert_eq!(all["totalDamage"].as_u64().unwrap(), boss["totalDamage"].as_u64().unwrap() * 2);
+        assert_eq!(all["players"][0]["damage"].as_u64().unwrap(), boss["players"][0]["damage"].as_u64().unwrap() * 2);
+        assert_eq!(all["targetId"], json!(0));
+        assert_eq!(all["target"]["name"], json!("Whole group damage"));
+        assert!(all["durationSec"].as_f64().unwrap() >= boss["durationSec"].as_f64().unwrap());
+        assert_eq!(group_state(None, &HashSet::new(), &HashSet::new(), "en")["totalDamage"], json!(0));
     }
 
     #[test]
