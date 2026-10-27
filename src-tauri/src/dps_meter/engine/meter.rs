@@ -69,6 +69,17 @@ struct AutoRecordState {
     done: bool,
 }
 
+/// A pause this long ends the fight, so the next pull on the same target starts a new
+/// clock (owner 27.10: a training dummy kept one fight, and one start time, for minutes
+/// and showed a tenth of the real DPS). Bosses get NotMeter's 90 s, other targets 15 s;
+/// the configured idle reset stays an upper bound, and 0 still means never.
+const FIGHT_GAP_SECS: u64 = 15;
+const BOSS_FIGHT_GAP_SECS: u64 = 90;
+
+fn fight_gap_secs(idle_reset_secs: u64, boss: bool) -> u64 {
+    idle_reset_secs.min(if boss { BOSS_FIGHT_GAP_SECS } else { FIGHT_GAP_SECS })
+}
+
 fn now_seconds() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -615,7 +626,8 @@ impl DpsMeter {
                     if let Some(started) = data_storage.start_time() {
                         let activity = data_storage.activity_at();
                         let idle_for = now_seconds() - activity.unwrap_or(started);
-                        if idle_for >= idle_reset_secs as f64 {
+                        let gap = fight_gap_secs(idle_reset_secs, data_storage.current_target_is_boss());
+                        if idle_for >= gap as f64 {
                             if let Some(meter) = app.try_state::<DpsMeter>() {
                                 meter.end_idle_fight(activity.is_some());
                             }
@@ -1034,4 +1046,16 @@ fn build_memory_snapshot(
         ping_ms: ping_tracker.current_ping_ms(),
         main_actor_name: data_storage.main_actor_name(),
     })
+}
+
+#[cfg(test)]
+mod fight_gap_tests {
+    use super::fight_gap_secs;
+
+    #[test]
+    fn a_pause_ends_the_fight_sooner_than_the_idle_reset() {
+        assert_eq!(fight_gap_secs(300, false), 15);
+        assert_eq!(fight_gap_secs(300, true), 90);
+        assert_eq!(fight_gap_secs(60, true), 60);
+    }
 }

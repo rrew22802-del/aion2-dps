@@ -1409,6 +1409,16 @@ impl DataStorage {
     pub fn last_target_by_main_actor(&self) -> Option<u32> {
         self.inner.read().unwrap().last_target_by_main_actor
     }
+
+    /// Whether the target of your fight is a known or possible boss.
+    pub fn current_target_is_boss(&self) -> bool {
+        let inner = self.inner.read().unwrap();
+        inner
+            .last_target_by_main_actor
+            .or(inner.last_target)
+            .and_then(|target| inner.mob_id_code_map.get(&target).copied())
+            .is_some_and(|code| self.boss_code_list.contains(&code) || inner.possible_boss_codes.contains(&code))
+    }
 }
 
 // only the own-only "01 01" form of 00 8D is counted (processor.rs), so a handful of packets with a clear leader is enough:
