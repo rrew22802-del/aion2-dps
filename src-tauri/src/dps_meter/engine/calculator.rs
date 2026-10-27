@@ -6,6 +6,7 @@ use crate::dps_meter::models::combat::{
     PacketHp, PlayerOverviewStat, PvpDamageOverviewStat, SkillStats, TargetInfo,
 };
 use crate::dps_meter::storage::data_storage::DataStorage;
+use crate::dps_meter::config::TRAINING_DUMMY_MOB_CODE;
 
 pub struct DpsCalculator {
     data_storage: Arc<DataStorage>,
@@ -370,8 +371,10 @@ fn build_target_infos(
         .iter()
         .map(|tid| {
             let mob_code = mob_id_code.get(tid).copied();
+            // Training dummies sit in the boss list (boss-only mode shows them), but a dummy never dies: as a boss its
+            // fight waited for a death and never ended (owner 27.10).
             let is_boss = mob_code
-                .map(|c| data_storage.is_known_boss_code(c) || data_storage.is_possible_boss(c))
+                .map(|c| (data_storage.is_known_boss_code(c) || data_storage.is_possible_boss(c)) && !TRAINING_DUMMY_MOB_CODE.contains(&c))
                 .unwrap_or(false);
             // A mob the catalogue does not name is labelled by its code rather
             // than left blank, so two unnamed targets stay distinguishable.

@@ -1426,7 +1426,8 @@ impl DataStorage {
             .last_target_by_main_actor
             .or(inner.last_target)
             .and_then(|target| inner.mob_id_code_map.get(&target).copied())
-            .is_some_and(|code| self.boss_code_list.contains(&code) || inner.possible_boss_codes.contains(&code))
+            .is_some_and(|code| (self.boss_code_list.contains(&code) || inner.possible_boss_codes.contains(&code))
+                && !TRAINING_DUMMY_MOB_CODE.contains(&code))
     }
 }
 
