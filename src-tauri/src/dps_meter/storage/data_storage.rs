@@ -497,7 +497,11 @@ impl DataStorage {
 
         // Game analyzer (boss fight 19.10, HP updates vs hits): damage on a mob counts only up to the HP it still
         // has — the killing blow loses its overkill, hits on an already dead mob count nothing.
-        let Some(damage) = inner.hp_left.map.get_mut(&packet.target_id).map_or(Some(packet.damage), |cap| cap.count(packet.damage)) else { return; };
+        // A training dummy never dies and refills its HP: capping it cut half the damage (owner 27.10, minHit 1 on every skill).
+        let dummy = inner.mob_id_code_map.get(&packet.target_id).is_some_and(|code| TRAINING_DUMMY_MOB_CODE.contains(code));
+        let Some(damage) = (if dummy { Some(packet.damage) } else {
+            inner.hp_left.map.get_mut(&packet.target_id).map_or(Some(packet.damage), |cap| cap.count(packet.damage))
+        }) else { return; };
         packet.damage = damage;
 
         // let actor_id = packet.actor_id;
