@@ -494,6 +494,11 @@ impl DataStorage {
         if packet.actor_id == 0 {
             return;
         }
+        // Something acting on itself is not damage (NotMeter drops self-events too). The training dummy heals itself
+        // 425 every 0.5 s with skill 1010000; as "damage" on your target it kept the fight alive forever (owner 27.10).
+        if packet.actor_id == packet.target_id {
+            return;
+        }
 
         // Game analyzer (boss fight 19.10, HP updates vs hits): damage on a mob counts only up to the HP it still
         // has — the killing blow loses its overkill, hits on an already dead mob count nothing.
